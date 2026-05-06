@@ -1,0 +1,33 @@
+# source for instance data
+input:
+  raw_dir: /data/ML-Raw-Data/VIVLI
+  it_file: VIVLI_FAMLI3_instance_metadata.csv
+  project: VIVLI_FAMLI3
+
+# information re output data
+output:
+  out_dir: /data/ML-Project-Data/VIVLI/Datasets/v1
+  out_file: VIVLI_FAMLI3_prototype.csv
+  folders:
+    raw: frame5
+    jpg: null
+    pt: data
+
+# image parameters
+image:
+  img_size: 288
+  channels: 1
+  dtype: uint8
+  alpha: 0.075
+  min_frames: 50
+  sample_frames: 50
+  doppler_rgb_thresh: 10
+  doppler_ybr_thresh: 100
+  doppler_pixel_thresh: 1000
+  raw_frame_index: 5
+  jpeg_quality: 100
+
+# overall processing parameters
+processing:
+  cores: 48
+  batch_size: 1000

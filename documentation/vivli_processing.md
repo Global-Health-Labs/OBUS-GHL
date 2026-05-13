@@ -32,6 +32,7 @@ It accepts:
 - Skip raw-only MP4 files when no `PhysicalDeltaX` value can be inferred, because the current MP4 preprocessing code requires it.
 - Skip PNG files because the current v9 preprocessing pipeline is video-oriented and filters PNG instances upstream.
 - When `--extract` is used, zip-backed inputs are extracted and directory-backed inputs are copied into the normalized layout automatically.
+- For already-expanded cohort directories, prefer `--stage-mode symlink` to create the normalized layout without duplicating terabytes of source data.
 - Duplicate destination conflicts are logged in the manifest instead of being silently overwritten.
 
 ## Example Commands
@@ -52,7 +53,8 @@ python ghlobus/ingestion/stage_vivli_for_preproc.py \
   --data-dir /path/to/structured-data \
   --cohort-dir /path/to/CohortExpanded \
   --raw-root /data/ML-Raw-Data/VIVLI \
-  --out-root /data/ML-Project-Data/VIVLI/Datasets/v1
+  --out-root /data/ML-Project-Data/VIVLI/Datasets/v1 \
+  --stage-mode symlink
 ```
 
 Stage metadata and extract raw files:

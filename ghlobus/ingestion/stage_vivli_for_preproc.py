@@ -7,7 +7,7 @@ preprocessing pipeline with minimal downstream code changes:
 1. Scan the structured-data zip plus all `Cohort*.zip` archives and/or
    expanded cohort directories.
 2. Build a preprocess-ready instance metadata CSV in `sheets/`.
-3. Optionally extract the referenced raw files into
+3. Optionally stage the referenced raw files into
    `<raw_root>/<project>/Ultrasound/YYYY-MM/<study_key>/`.
 
 The output metadata is designed to be consumed directly by
@@ -124,7 +124,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--extract",
         action="store_true",
-        help="Stage files into --raw-root by extracting from zips or copying from expanded directories.",
+        help="Deprecated alias for --stage-mode copy.",
+    )
+    parser.add_argument(
+        "--stage-mode",
+        choices=("none", "copy", "symlink"),
+        default="none",
+        help=(
+            "How to populate --raw-root. Use copy for zip inputs, symlink for "
+            "already-expanded directory inputs, and none for metadata only."
+        ),
     )
     return parser.parse_args()
 
@@ -164,6 +173,8 @@ def resolve_structured_zip(data_dir: Path, structured_zip: Path | None) -> Path:
 def resolve_cohort_zips(data_dir: Path, cohort_zips: list[str], cohort_dirs: list[str]) -> list[Path]:
     if cohort_zips:
         resolved = [resolve_path(Path(value), data_dir) for value in cohort_zips]
+    elif cohort_dirs:
+        resolved = []
     else:
         resolved = sorted(
             path for path in data_dir.glob("*.zip") if path.is_file() and path.name.lower().startswith("cohort")
@@ -435,6 +446,16 @@ def ensure_copied(source_path: Path, destination: Path) -> str:
     return "copied"
 
 
+def ensure_symlinked(source_path: Path, destination: Path) -> str:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        if destination.is_symlink() and destination.resolve() == source_path.resolve():
+            return "already_symlinked"
+        return "already_present"
+    destination.symlink_to(source_path.resolve())
+    return "symlinked"
+
+
 def main() -> None:
     args = parse_args()
     data_dir = args.data_dir.expanduser().resolve()
@@ -442,6 +463,7 @@ def main() -> None:
     out_root = args.out_root.expanduser().resolve()
     sheets_dir = out_root / META_DIR
     sheets_dir.mkdir(parents=True, exist_ok=True)
+    stage_mode = "copy" if args.extract else args.stage_mode
 
     structured_zip = resolve_structured_zip(data_dir, args.structured_zip)
     cohort_zips = resolve_cohort_zips(data_dir, args.cohort_zip, args.cohort_dir)
@@ -623,11 +645,15 @@ def main() -> None:
             manifest_rows.append(manifest_row)
             continue
         seen_destinations[dest_key] = raw_entry.source_path
-        if args.extract:
+        if stage_mode != "none":
             if raw_entry.source_type == "zip":
+                if stage_mode == "symlink":
+                    raise ValueError("Cannot symlink files inside zip archives. Use --stage-mode copy for zip inputs.")
                 action = ensure_extracted(cohort_zip_map[raw_entry.source_label], raw_entry.source_member, destination)
-            else:
+            elif stage_mode == "copy":
                 action = ensure_copied(Path(raw_entry.source_path), destination)
+            else:
+                action = ensure_symlinked(Path(raw_entry.source_path), destination)
             manifest_row["stage_action"] = action
         stage_action_counter[manifest_row["stage_action"]] += 1
         manifest_rows.append(manifest_row)
@@ -643,6 +669,7 @@ def main() -> None:
         "cohort_zips": [path.name for path in cohort_zips],
         "cohort_dirs": [path.name for path in cohort_dirs],
         "extract_enabled": args.extract,
+        "stage_mode": stage_mode,
         "raw_entry_count": len(raw_entries),
         "metadata_row_count": len(metadata_rows),
         "skipped_row_count": len(skipped_rows),
@@ -667,6 +694,7 @@ def main() -> None:
     print(f"Raw root: {raw_root}")
     print(f"Output root: {out_root}")
     print(f"Extract enabled: {args.extract}")
+    print(f"Stage mode: {stage_mode}")
     print(f"Wrote metadata CSV: {metadata_path}")
     print(f"Wrote skipped-file CSV: {skipped_path}")
     print(f"Wrote manifest CSV: {manifest_path}")

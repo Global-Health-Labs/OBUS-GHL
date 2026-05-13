@@ -83,7 +83,7 @@ def read_mp4_video(filepath: str,
     """
     # read the MP4 video file
     try:
-        reader = imageio.get_reader(filepath)
+        reader = imageio.get_reader(filepath, format='ffmpeg')
     except:
         return None, "Read_MP4_failed", BAD_SHAPE, None
 

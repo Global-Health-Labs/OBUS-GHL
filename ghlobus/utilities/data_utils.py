@@ -50,6 +50,7 @@ def read_mp4_video(filepath: str,
                    doppler_rgb_thresh: int = 10,
                    doppler_pixel_thresh: int = 1000,
                    min_frames: int = 50,
+                   max_frames: int = 10000,
                    ) \
         -> Tuple[Union[torch.Tensor, None],
                  Union[str, None],
@@ -74,6 +75,7 @@ def read_mp4_video(filepath: str,
         doppler_rgb_thresh: int         Threshold for gray level Doppler filtering
         doppler_pixel_thresh: int       Threshold for pixel count Doppler filtering
         min_frames: int                 Minimum number of frames in a video
+        max_frames: int                 Maximum MP4 frames to read before rejecting
 
     Returns:
         frames: torch.Tensor            Frames of the video as a Tensor (or None)
@@ -87,12 +89,27 @@ def read_mp4_video(filepath: str,
     except:
         return None, "Read_MP4_failed", BAD_SHAPE, None
 
+    try:
+        nframes = reader.count_frames()
+        if nframes > max_frames:
+            reader.close()
+            return None, "Excessive_MP4_frames", (nframes, -99, -99, -99), None
+    except:
+        pass
+
     # step through frame-by-frame
     try:
         frames = list()
-        for im in reader:
+        for idx, im in enumerate(reader):
+            if idx >= max_frames:
+                reader.close()
+                return None, "Excessive_MP4_frames", (idx + 1, -99, -99, -99), None
             frames.append(im)
         reader.close()
+    except MemoryError:
+        # close the video capture
+        reader.close()
+        return None, "MP4_memory_error", BAD_SHAPE, None
     except:
         # close the video capture
         reader.close()
@@ -163,6 +180,7 @@ def preprocess_video(file_info: pd.Series,
                      dtype: str = 'uint8',
                      alpha: float = 0.075,
                      min_frames: int = 50,
+                     max_mp4_frames: int = 10000,
                      sample_frames: Union[int, None] = None,
                      doppler_rgb_thresh: int = 10,
                      doppler_ybr_thresh: int = 100,
@@ -195,6 +213,7 @@ def preprocess_video(file_info: pd.Series,
         dtype: str                  'uint8' or 'float32'
         alpha: float                Desired final alpha when images are scaled (resized, resampled)
         min_frames: int             Minimum number of frames in a video
+        max_mp4_frames: int         Maximum MP4 frames to read before rejecting
         sample_frames: int          Number of frames in a video to sample and write as jpgs
                                         set to None to write all frames
         doppler_rgb_thresh: int     Threshold for gray level Doppler filtering
@@ -365,6 +384,7 @@ def preprocess_video(file_info: pd.Series,
             doppler_rgb_thresh=doppler_rgb_thresh,
             doppler_pixel_thresh=doppler_pixel_thresh,
             min_frames=min_frames,
+            max_frames=max_mp4_frames,
         )
 
         if frames is None:

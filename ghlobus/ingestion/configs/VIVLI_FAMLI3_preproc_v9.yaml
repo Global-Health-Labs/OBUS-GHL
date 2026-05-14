@@ -20,6 +20,7 @@ image:
   dtype: uint8
   alpha: 0.075
   min_frames: 50
+  max_mp4_frames: 10000
   sample_frames: 50
   doppler_rgb_thresh: 10
   doppler_ybr_thresh: 100

@@ -93,6 +93,10 @@ def read_mp4_video(filepath: str,
         nframes = reader.count_frames()
         if nframes > max_frames:
             reader.close()
+            print(
+                f"Rejecting MP4 with excessive frame count: "
+                f"{filepath} has {nframes} frames, max allowed is {max_frames}."
+            )
             return None, "Excessive_MP4_frames", (nframes, -99, -99, -99), None
     except:
         pass
@@ -103,6 +107,10 @@ def read_mp4_video(filepath: str,
         for idx, im in enumerate(reader):
             if idx >= max_frames:
                 reader.close()
+                print(
+                    f"Rejecting MP4 after reading too many frames: "
+                    f"{filepath} exceeded {max_frames} frames."
+                )
                 return None, "Excessive_MP4_frames", (idx + 1, -99, -99, -99), None
             frames.append(im)
         reader.close()

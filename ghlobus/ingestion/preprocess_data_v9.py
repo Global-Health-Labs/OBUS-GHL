@@ -22,6 +22,8 @@ This software is licensed under the MIT license. See LICENSE.txt in the root of
 the repository for details.
 """
 import os
+import shutil
+import subprocess
 import yaml
 import argparse
 import numpy as np
@@ -57,6 +59,87 @@ def out_folder_name(df: pd.DataFrame) -> pd.Series:
     return relpath_folders + "_" + df['Manufacturer'] + "_" + df['ManufacturerModelName']
 
 
+def batch_output_paths(batch_df: pd.DataFrame,
+                       out_dir: str,
+                       project: str,
+                       folders: dict,
+                       ) -> list[str]:
+    """
+    List local outputs owned by a completed batch.
+
+    Batches align with exam boundaries, so exam directories are unique to one
+    batch. Raw frame files are flat, so they are matched by exam_dir prefix.
+    """
+    output_paths = []
+    exam_dirs = sorted(batch_df['exam_dir'].drop_duplicates().tolist())
+
+    for fmt in ['pt', 'jpg']:
+        folder = folders.get(fmt)
+        if folder is None:
+            continue
+        for exam_dir in exam_dirs:
+            local_dir = os.path.join(out_dir, folder, project, exam_dir)
+            if os.path.isdir(local_dir):
+                output_paths.append(local_dir)
+
+    raw_folder = folders.get('raw')
+    if raw_folder is not None:
+        for raw_project in [project, project + "_bad"]:
+            local_dir = os.path.join(out_dir, raw_folder, raw_project)
+            for exam_dir in exam_dirs:
+                output_paths.extend(glob(os.path.join(local_dir, f"{exam_dir}_*")))
+
+    return sorted(output_paths)
+
+
+def write_batch_manifest(batch_idx: int,
+                         output_paths: list[str],
+                         manifest_dir: str,
+                         ) -> str:
+    """
+    Write one local manifest file containing the outputs owned by a batch.
+    """
+    os.makedirs(manifest_dir, exist_ok=True)
+    manifest_path = os.path.join(manifest_dir, f"batch_{batch_idx:03d}_outputs.txt")
+    with open(manifest_path, "w") as handle:
+        handle.write("\n".join(output_paths))
+        handle.write("\n")
+    return manifest_path
+
+
+def run_post_batch_command(command: list[str],
+                           batch_idx: int,
+                           manifest_path: str,
+                           batch_log_path: str,
+                           out_dir: str,
+                           ) -> None:
+    """
+    Run a configured post-batch command after placeholder substitution.
+    """
+    replacements = {
+        "batch_idx": str(batch_idx),
+        "manifest_path": manifest_path,
+        "batch_log_path": batch_log_path,
+        "out_dir": out_dir,
+    }
+    resolved_command = [
+        part.format(**replacements)
+        for part in command
+    ]
+    subprocess.run(resolved_command, check=True)
+
+
+def delete_batch_outputs(output_paths: list[str]) -> None:
+    """
+    Remove local outputs after a successful post-batch handoff.
+    """
+    for path in output_paths:
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        elif os.path.exists(path):
+            os.remove(path)
+
+
 # noinspection PyUnboundLocalVariable
 def main():
     # Default yaml file
@@ -84,6 +167,9 @@ def main():
     # get the raw and csv file directory
     raw_dir = info['input']['raw_dir']
     project = info['input']['project']
+    post_batch = info['processing'].get('post_batch', {})
+    if post_batch.get('delete_local_outputs', False) and not post_batch.get('command', []):
+        raise ValueError("post_batch.command is required when delete_local_outputs is true.")
 
     # create destination directory if not there
     out_dir = info['output']['out_dir']
@@ -119,6 +205,10 @@ def main():
 
     # get name of metadata directory
     meta_path = os.path.join(out_dir, META_DIR)
+    batch_manifest_dir = post_batch.get(
+        'manifest_dir',
+        os.path.join(out_dir, 'batch_manifests', project),
+    )
 
     # read main instance table
     it_path = os.path.join(
@@ -289,6 +379,31 @@ def main():
         batch_log_path = os.path.join(log_dir, f"batch_{batch_idx:03d}.csv")
         batch_df.to_csv(batch_log_path, index=False)
         print(f"Saved log for batch {batch_idx} to {batch_log_path}.")
+
+        # Optionally hand completed batch outputs to an external command.
+        if post_batch.get('enabled', False):
+            output_paths = batch_output_paths(
+                batch_df,
+                out_dir,
+                project,
+                info['output']['folders'],
+            )
+            manifest_path = write_batch_manifest(
+                batch_idx,
+                output_paths,
+                batch_manifest_dir,
+            )
+            command = post_batch.get('command', [])
+            if command:
+                run_post_batch_command(
+                    command,
+                    batch_idx,
+                    manifest_path,
+                    batch_log_path,
+                    out_dir,
+                )
+            if post_batch.get('delete_local_outputs', False):
+                delete_batch_outputs(output_paths)
 
         # append this batch's dataframe to the list of batch dataframes
         batch_dfs[batch_idx] = batch_df

@@ -74,6 +74,26 @@ python ghlobus/ingestion/preprocess_data_v9.py \
   --yaml ghlobus/ingestion/configs/VIVLI_FAMLI3_preproc_v9.yaml
 ```
 
+## Batch Handoff
+
+`preprocess_data_v9.py` can write a per-batch manifest and run a configured
+post-batch command after each completed log file. The core preprocessor does
+not assume GCS or any other destination; it only passes the manifest path,
+batch log path, and local output root to the configured command.
+
+The Vivli config includes a disabled example that calls
+`upload_batch_manifest_to_gcs.py`. For quota-limited runs, enable it and set:
+
+```yaml
+processing:
+  post_batch:
+    enabled: true
+    delete_local_outputs: true
+```
+
+The default manifest location is `<out_dir>/batch_manifests/<project>` if
+`manifest_dir` is omitted.
+
 ## Notes
 
 - Update the paths in [VIVLI_FAMLI3_preproc_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_preproc_v9.yaml) for your VM or container before running preprocessing.

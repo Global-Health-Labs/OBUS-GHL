@@ -37,8 +37,19 @@ from joblib import Parallel, delayed
 from ghlobus.utilities.data_utils import read_spreadsheet
 from ghlobus.utilities.data_utils import preprocess_video
 from ghlobus.utilities.data_utils import create_video_df
+from ghlobus.utilities.data_utils import fail_reason_acronym
 from ghlobus.utilities.data_utils import GOOD_VIDEO_MSG
 from ghlobus.utilities.constants import META_DIR
+
+
+def output_file_base_name(filename: str) -> str:
+    """
+    Match preprocess_video's output base-name convention.
+    """
+    file_base_name = os.path.basename(filename)
+    if file_base_name.lower().endswith(('.dcm', '.mp4')):
+        file_base_name = os.path.splitext(file_base_name)[0]
+    return file_base_name
 
 
 def out_folder_name(df: pd.DataFrame) -> pd.Series:
@@ -66,33 +77,59 @@ def batch_output_paths(batch_df: pd.DataFrame,
                        ) -> list[str]:
     """
     List local outputs owned by a completed batch.
-
-    Batches align with exam boundaries, so exam directories are unique to one
-    batch. Raw frame files are flat, so they are matched by exam_dir prefix.
     """
     output_paths = []
-    exam_dirs = sorted(batch_df['exam_dir'].drop_duplicates().tolist())
 
     for fmt in ['pt', 'jpg']:
         folder = folders.get(fmt)
         if folder is None:
             continue
-        for exam_dir in exam_dirs:
-            local_dir = os.path.join(out_dir, folder, project, exam_dir)
-            if os.path.isdir(local_dir):
-                output_paths.append(local_dir)
+        for _, row in batch_df.iterrows():
+            file_base_name = output_file_base_name(row['filename'])
+            local_base = os.path.join(
+                out_dir,
+                folder,
+                project,
+                row['exam_dir'],
+                file_base_name,
+            )
+            if fmt == 'pt':
+                local_path = local_base + '.pt'
+                if os.path.exists(local_path):
+                    output_paths.append(local_path)
+            else:
+                output_paths.extend(glob(local_base + "_#*.jpg"))
 
     raw_folder = folders.get('raw')
     if raw_folder is not None:
-        for raw_project in [project, project + "_bad"]:
-            local_dir = os.path.join(out_dir, raw_folder, raw_project)
-            for exam_dir in exam_dirs:
-                output_paths.extend(glob(os.path.join(local_dir, f"{exam_dir}_*")))
+        for _, row in batch_df.iterrows():
+            file_base_name = output_file_base_name(row['filename'])
+            if row['fail_reason'] == GOOD_VIDEO_MSG:
+                local_path = os.path.join(
+                    out_dir,
+                    raw_folder,
+                    project,
+                    f"{row['exam_dir']}_{file_base_name}_#0005.png",
+                )
+                if os.path.exists(local_path):
+                    output_paths.append(local_path)
+            else:
+                local_dir = os.path.join(out_dir, raw_folder, project + "_bad")
+                try:
+                    reason = fail_reason_acronym(row['fail_reason'])
+                except KeyError:
+                    reason = "*"
+                output_paths.extend(glob(
+                    os.path.join(
+                        local_dir,
+                        f"{row['exam_dir']}_{file_base_name}_{reason}_#0005.png",
+                    )
+                ))
 
     return sorted(output_paths)
 
 
-def write_batch_manifest(batch_idx: int,
+def write_batch_manifest(batch_idx: int | str,
                          output_paths: list[str],
                          manifest_dir: str,
                          ) -> str:
@@ -100,7 +137,11 @@ def write_batch_manifest(batch_idx: int,
     Write one local manifest file containing the outputs owned by a batch.
     """
     os.makedirs(manifest_dir, exist_ok=True)
-    manifest_path = os.path.join(manifest_dir, f"batch_{batch_idx:03d}_outputs.txt")
+    if isinstance(batch_idx, int):
+        manifest_name = f"batch_{batch_idx:03d}_outputs.txt"
+    else:
+        manifest_name = f"{batch_idx}_outputs.txt"
+    manifest_path = os.path.join(manifest_dir, manifest_name)
     with open(manifest_path, "w") as handle:
         handle.write("\n".join(output_paths))
         handle.write("\n")
@@ -108,7 +149,7 @@ def write_batch_manifest(batch_idx: int,
 
 
 def run_post_batch_command(command: list[str],
-                           batch_idx: int,
+                           batch_idx: int | str,
                            manifest_path: str,
                            batch_log_path: str,
                            out_dir: str,
@@ -129,15 +170,39 @@ def run_post_batch_command(command: list[str],
     subprocess.run(resolved_command, check=True)
 
 
-def delete_batch_outputs(output_paths: list[str]) -> None:
+def final_output_paths(meta_path: str) -> list[str]:
+    """
+    List final metadata/prototype outputs to hand off after preprocessing.
+    """
+    return sorted(
+        path for path in glob(os.path.join(meta_path, "*"))
+        if os.path.isfile(path)
+    )
+
+
+def delete_batch_outputs(output_paths: list[str],
+                         out_dir: str,
+                         ) -> None:
     """
     Remove local outputs after a successful post-batch handoff.
     """
+    parent_dirs = set()
     for path in output_paths:
         if os.path.isdir(path):
             shutil.rmtree(path)
         elif os.path.exists(path):
             os.remove(path)
+        parent_dirs.add(os.path.dirname(path))
+
+    out_dir = os.path.abspath(out_dir)
+    for parent_dir in sorted(parent_dirs, key=len, reverse=True):
+        parent_dir = os.path.abspath(parent_dir)
+        while parent_dir.startswith(out_dir) and parent_dir != out_dir:
+            try:
+                os.rmdir(parent_dir)
+            except OSError:
+                break
+            parent_dir = os.path.dirname(parent_dir)
 
 
 # noinspection PyUnboundLocalVariable
@@ -403,7 +468,7 @@ def main():
                     out_dir,
                 )
             if post_batch.get('delete_local_outputs', False):
-                delete_batch_outputs(output_paths)
+                delete_batch_outputs(output_paths, out_dir)
 
         # append this batch's dataframe to the list of batch dataframes
         batch_dfs[batch_idx] = batch_df
@@ -425,6 +490,23 @@ def main():
     out_file_path = os.path.join(meta_path, info['output']['out_file'])
     output_df.to_csv(out_file_path, index=False)
     print(f"Saved output for {output_df.shape[0]} videos to {info['output']['out_file']}.")
+
+    if post_batch.get('enabled', False) and post_batch.get('handoff_final_outputs', True):
+        final_paths = final_output_paths(meta_path)
+        final_manifest_path = write_batch_manifest(
+            "final",
+            final_paths,
+            batch_manifest_dir,
+        )
+        command = post_batch.get('command', [])
+        if command:
+            run_post_batch_command(
+                command,
+                "final",
+                final_manifest_path,
+                out_file_path,
+                out_dir,
+            )
 
 
 # run this script if it is the main program, not if importing a method

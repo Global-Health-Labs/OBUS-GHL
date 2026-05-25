@@ -81,8 +81,11 @@ post-batch command after each completed log file. The core preprocessor does
 not assume GCS or any other destination; it only passes the manifest path,
 batch log path, and local output root to the configured command.
 
-The Vivli config includes a disabled example that calls
-`upload_batch_manifest_to_gcs.py`. For quota-limited runs, enable it and set:
+The Vivli config includes a disabled example that calls the GCS-specific
+adapter `upload_batch_manifest_to_gcs.py`. The adapter retries failed
+`gcloud storage` operations and falls back to uploading through a temporary
+object when a resumable upload for the destination object gets stuck. For
+quota-limited runs, enable it and set:
 
 ```yaml
 processing:

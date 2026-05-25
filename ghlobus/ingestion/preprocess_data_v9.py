@@ -362,12 +362,13 @@ def main():
         else:
             # read the batches into batch_dfs
             print(f"Found {len(log_files)} log files in {log_dir}.")
-            batch_idx = -1
+            logged_batch_indices = []
             for log_file in log_files:
                 batch_idx = int(os.path.basename(log_file).split('_')[-1].split('.')[0])
                 batch_dfs[batch_idx] = pd.read_csv(log_file)
+                logged_batch_indices.append(batch_idx)
             # determine last batch number from file name
-            start_batch = batch_idx + 1
+            start_batch = max(logged_batch_indices) + 1
             print(f"Starting process at batch {start_batch}.")
 
     # determine the beginning video index for the first batch

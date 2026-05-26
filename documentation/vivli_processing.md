@@ -57,6 +57,23 @@ python ghlobus/ingestion/stage_vivli_for_preproc.py \
   --stage-mode symlink
 ```
 
+For GCS data mounted through Cloud Storage FUSE, avoid recursive filesystem
+walks during staging by using the GCS listing backend:
+
+```bash
+python ghlobus/ingestion/stage_vivli_for_preproc.py \
+  --data-dir /mnt/localssd/vivli_input \
+  --structured-zip /mnt/localssd/vivli_input/Vivli-UNC-FAMLI3Twins-StructuredData-19-Feb-2026.zip \
+  --cohort-dir /mnt/vivli_gcs/Cohort1 \
+  --cohort-dir /mnt/vivli_gcs/Cohort2 \
+  --raw-root /mnt/localssd/vivli_raw_full \
+  --out-root /mnt/localssd/vivli_out_full \
+  --stage-mode symlink \
+  --listing-backend gcs \
+  --gcs-uri-base gs://vivli-data/expanded/FAMLI3 \
+  --gcs-mount-root /mnt/vivli_gcs
+```
+
 Stage metadata and extract raw files:
 
 ```bash

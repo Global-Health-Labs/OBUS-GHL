@@ -21,6 +21,7 @@ import csv
 import json
 import re
 import shutil
+import subprocess
 import zipfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -133,6 +134,32 @@ def parse_args() -> argparse.Namespace:
         help=(
             "How to populate --raw-root. Use copy for zip inputs, symlink for "
             "already-expanded directory inputs, and none for metadata only."
+        ),
+    )
+    parser.add_argument(
+        "--listing-backend",
+        choices=("auto", "filesystem", "gcs"),
+        default="filesystem",
+        help=(
+            "How to enumerate expanded cohort directories. Use gcs to avoid "
+            "slow recursive walks through Cloud Storage FUSE mounts."
+        ),
+    )
+    parser.add_argument(
+        "--gcs-uri-base",
+        default=None,
+        help=(
+            "GCS URI prefix that corresponds to --gcs-mount-root, e.g. "
+            "gs://bucket/expanded/FAMLI3. Required for --listing-backend gcs."
+        ),
+    )
+    parser.add_argument(
+        "--gcs-mount-root",
+        type=Path,
+        default=None,
+        help=(
+            "Filesystem mount root corresponding to --gcs-uri-base, e.g. "
+            "/mnt/vivli_gcs. Required for --listing-backend gcs."
         ),
     )
     return parser.parse_args()
@@ -345,6 +372,98 @@ def scan_cohort_dirs(cohort_dirs: list[Path], project: str) -> list[RawEntry]:
     return raw_entries
 
 
+def should_use_gcs_listing(args: argparse.Namespace) -> bool:
+    if args.listing_backend == "gcs":
+        return True
+    if args.listing_backend == "auto":
+        return bool(args.gcs_uri_base and args.gcs_mount_root)
+    return False
+
+
+def gcs_uri_for_cohort_dir(cohort_dir: Path, gcs_uri_base: str, gcs_mount_root: Path) -> str:
+    relative_parts = cohort_dir.resolve().relative_to(gcs_mount_root.resolve()).parts
+    return "/".join([gcs_uri_base.rstrip("/"), *relative_parts])
+
+
+def mounted_path_for_gcs_uri(gcs_uri: str, gcs_uri_base: str, gcs_mount_root: Path) -> Path:
+    relative_uri = gcs_uri.removeprefix(gcs_uri_base.rstrip("/") + "/")
+    return gcs_mount_root / Path(*relative_uri.split("/"))
+
+
+def iter_gcs_objects(gcs_prefix: str) -> Iterable[str]:
+    process = subprocess.Popen(
+        ["gcloud", "storage", "ls", "--recursive", gcs_prefix.rstrip("/")],
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    try:
+        for line in process.stdout:
+            uri = line.strip()
+            if not uri or uri.endswith("/:") or uri.endswith("/"):
+                continue
+            if uri.startswith("gs://"):
+                yield uri
+    finally:
+        returncode = process.wait()
+        if returncode:
+            raise subprocess.CalledProcessError(returncode, process.args)
+
+
+def scan_cohort_dirs_with_gcs_listing(cohort_dirs: list[Path],
+                                      project: str,
+                                      gcs_uri_base: str,
+                                      gcs_mount_root: Path,
+                                      ) -> list[RawEntry]:
+    raw_entries: list[RawEntry] = []
+
+    for root_dir in cohort_dirs:
+        cohort_prefix = gcs_uri_for_cohort_dir(root_dir, gcs_uri_base, gcs_mount_root)
+        print(f"Listing GCS objects under {cohort_prefix}", flush=True)
+        for uri in iter_gcs_objects(cohort_prefix):
+            path = mounted_path_for_gcs_uri(uri, gcs_uri_base, gcs_mount_root)
+            parts = path.relative_to(root_dir).parts
+            if len(parts) < 2:
+                continue
+
+            study_index = None
+            study_match = None
+            for idx, part in enumerate(parts[:-1]):
+                match = STUDY_DIR_RE.match(part)
+                if match:
+                    study_index = idx
+                    study_match = match
+                    break
+
+            if study_index is None or study_match is None:
+                continue
+
+            pidscan, studydate, studytime = study_match.groups()
+            study_key = f"{pidscan}_{studydate}_{studytime}"
+            relpath = build_relpath(project, study_key, studydate)
+            filename = path.name
+            internal_dir = "/".join(parts[: len(parts) - 1])
+            raw_entries.append(
+                RawEntry(
+                    source_label=root_dir.name,
+                    source_type="dir",
+                    source_member=str(path.relative_to(root_dir)),
+                    internal_dir=internal_dir,
+                    study_key=study_key,
+                    pidscan=pidscan,
+                    studydate=studydate,
+                    studytime=studytime,
+                    relpath=relpath,
+                    filename=filename,
+                    normalized_filename=normalize_filename(filename),
+                    extension=detect_extension(filename),
+                    source_path=str(path),
+                )
+            )
+
+    return raw_entries
+
+
 def load_instance_rows(structured_zip: Path) -> list[dict[str, str]]:
     rows = []
     for row in open_csv_from_zip(structured_zip, "C3_INSTANCE_TABLE.csv"):
@@ -475,7 +594,20 @@ def main() -> None:
     manifest_path = sheets_dir / args.manifest_file
 
     cohort_dirs = resolve_cohort_dirs(data_dir, args.cohort_dir, cohort_zips)
-    raw_entries = scan_cohort_zips(cohort_zips, args.project) + scan_cohort_dirs(cohort_dirs, args.project)
+    if should_use_gcs_listing(args):
+        if not args.gcs_uri_base or args.gcs_mount_root is None:
+            raise ValueError("--gcs-uri-base and --gcs-mount-root are required for GCS listing.")
+        gcs_mount_root = args.gcs_mount_root.expanduser().resolve()
+        raw_entries = scan_cohort_zips(cohort_zips, args.project) + scan_cohort_dirs_with_gcs_listing(
+            cohort_dirs,
+            args.project,
+            args.gcs_uri_base,
+            gcs_mount_root,
+        )
+        listing_backend = "gcs"
+    else:
+        raw_entries = scan_cohort_zips(cohort_zips, args.project) + scan_cohort_dirs(cohort_dirs, args.project)
+        listing_backend = "filesystem"
     instance_rows = load_instance_rows(structured_zip)
 
     instance_by_pidscan_filename: dict[tuple[str, str], list[dict[str, str]]] = defaultdict(list)
@@ -668,6 +800,7 @@ def main() -> None:
         "structured_zip": structured_zip.name,
         "cohort_zips": [path.name for path in cohort_zips],
         "cohort_dirs": [path.name for path in cohort_dirs],
+        "listing_backend": listing_backend,
         "extract_enabled": args.extract,
         "stage_mode": stage_mode,
         "raw_entry_count": len(raw_entries),
@@ -691,6 +824,7 @@ def main() -> None:
     print(f"Structured zip: {structured_zip}")
     print(f"Cohort zips: {[path.name for path in cohort_zips]}")
     print(f"Cohort dirs: {[path.name for path in cohort_dirs]}")
+    print(f"Listing backend: {listing_backend}")
     print(f"Raw root: {raw_root}")
     print(f"Output root: {out_root}")
     print(f"Extract enabled: {args.extract}")

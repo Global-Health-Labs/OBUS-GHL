@@ -58,7 +58,8 @@ python ghlobus/ingestion/stage_vivli_for_preproc.py \
 ```
 
 For GCS data mounted through Cloud Storage FUSE, avoid recursive filesystem
-walks during staging by using the GCS listing backend:
+walks during staging by using the GCS listing backend. With a running
+`gcsfuse` process, `auto` can usually infer the matching `gs://` prefix:
 
 ```bash
 python ghlobus/ingestion/stage_vivli_for_preproc.py \
@@ -68,7 +69,12 @@ python ghlobus/ingestion/stage_vivli_for_preproc.py \
   --cohort-dir /mnt/vivli_gcs/Cohort2 \
   --raw-root /mnt/localssd/vivli_raw_full \
   --out-root /mnt/localssd/vivli_out_full \
-  --stage-mode symlink \
+  --stage-mode symlink
+```
+
+If automatic mount inference is unavailable, add:
+
+```bash
   --listing-backend gcs \
   --gcs-uri-base gs://vivli-data/expanded/FAMLI3 \
   --gcs-mount-root /mnt/vivli_gcs

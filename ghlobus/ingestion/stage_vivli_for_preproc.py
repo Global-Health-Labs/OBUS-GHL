@@ -139,10 +139,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--listing-backend",
         choices=("auto", "filesystem", "gcs"),
-        default="filesystem",
+        default="auto",
         help=(
-            "How to enumerate expanded cohort directories. Use gcs to avoid "
-            "slow recursive walks through Cloud Storage FUSE mounts."
+            "How to enumerate expanded cohort directories. auto uses GCS "
+            "object listing when cohort dirs are under a Cloud Storage FUSE "
+            "mount that can be inferred, otherwise filesystem walking."
         ),
     )
     parser.add_argument(
@@ -150,7 +151,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "GCS URI prefix that corresponds to --gcs-mount-root, e.g. "
-            "gs://bucket/expanded/FAMLI3. Required for --listing-backend gcs."
+            "gs://bucket/expanded/FAMLI3. Required for --listing-backend gcs "
+            "unless it can be inferred from a running gcsfuse process."
         ),
     )
     parser.add_argument(
@@ -159,7 +161,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Filesystem mount root corresponding to --gcs-uri-base, e.g. "
-            "/mnt/vivli_gcs. Required for --listing-backend gcs."
+            "/mnt/vivli_gcs. Required for --listing-backend gcs unless it can "
+            "be inferred from a running gcsfuse process."
         ),
     )
     return parser.parse_args()
@@ -372,12 +375,138 @@ def scan_cohort_dirs(cohort_dirs: list[Path], project: str) -> list[RawEntry]:
     return raw_entries
 
 
-def should_use_gcs_listing(args: argparse.Namespace) -> bool:
-    if args.listing_backend == "gcs":
-        return True
-    if args.listing_backend == "auto":
-        return bool(args.gcs_uri_base and args.gcs_mount_root)
-    return False
+@dataclass(frozen=True)
+class GcsMount:
+    mount_root: Path
+    uri_base: str
+
+
+def parse_mountinfo() -> list[tuple[Path, str, str]]:
+    mounts: list[tuple[Path, str, str]] = []
+    mountinfo_path = Path("/proc/self/mountinfo")
+    if not mountinfo_path.exists():
+        return mounts
+
+    for line in mountinfo_path.read_text(errors="replace").splitlines():
+        if " - " not in line:
+            continue
+        left, right = line.split(" - ", 1)
+        left_parts = left.split()
+        right_parts = right.split()
+        if len(left_parts) < 5 or len(right_parts) < 3:
+            continue
+        mount_point = Path(left_parts[4].replace("\\040", " "))
+        filesystem_type = right_parts[0]
+        mount_source = right_parts[1]
+        mounts.append((mount_point, filesystem_type, mount_source))
+    return mounts
+
+
+def gcsfuse_process_mounts() -> list[GcsMount]:
+    mounts: list[GcsMount] = []
+    proc_dir = Path("/proc")
+    if not proc_dir.exists():
+        return mounts
+    options_with_values = {
+        "--app-name",
+        "--billing-project",
+        "--client-protocol",
+        "--debug_fuse_errors",
+        "--debug_gcs",
+        "--debug_mutex",
+        "--debug_s3",
+        "--debug_invariants",
+        "--file-mode",
+        "--gid",
+        "--http-client-timeout",
+        "--key-file",
+        "--limit-bytes-per-sec",
+        "--limit-ops-per-sec",
+        "--log-file",
+        "--log-format",
+        "--log-severity",
+        "--max-conns-per-host",
+        "--metadata-cache-ttl-secs",
+        "--o",
+        "-o",
+        "--only-dir",
+        "--rename-dir-limit",
+        "--retry-multiplier",
+        "--sequential-read-size-mb",
+        "--stat-cache-capacity",
+        "--stat-cache-ttl",
+        "--temp-dir",
+        "--type-cache-ttl",
+        "--uid",
+    }
+
+    for cmdline_path in proc_dir.glob("[0-9]*/cmdline"):
+        try:
+            raw_cmdline = cmdline_path.read_bytes()
+        except OSError:
+            continue
+        if not raw_cmdline:
+            continue
+        argv = [part.decode(errors="replace") for part in raw_cmdline.split(b"\0") if part]
+        if not argv or Path(argv[0]).name != "gcsfuse":
+            continue
+        positional_args = []
+        only_dir = ""
+        idx = 1
+        while idx < len(argv):
+            arg = argv[idx]
+            if arg == "--only-dir" and idx + 1 < len(argv):
+                only_dir = argv[idx + 1].strip("/")
+                idx += 2
+                continue
+            if arg.startswith("--only-dir="):
+                only_dir = arg.split("=", 1)[1].strip("/")
+                idx += 1
+                continue
+            if arg in options_with_values and idx + 1 < len(argv):
+                idx += 2
+                continue
+            if not arg.startswith("-"):
+                positional_args.append(arg)
+            idx += 1
+        if len(positional_args) < 2:
+            continue
+        bucket = positional_args[-2]
+        mount_root = Path(positional_args[-1])
+        if bucket and mount_root:
+            uri_base = f"gs://{bucket}"
+            if only_dir:
+                uri_base = f"{uri_base}/{only_dir}"
+            mounts.append(GcsMount(mount_root=mount_root.resolve(), uri_base=uri_base.rstrip("/")))
+    return mounts
+
+
+def infer_gcs_mount(cohort_dirs: list[Path],
+                    gcs_uri_base: str | None,
+                    gcs_mount_root: Path | None,
+                    ) -> GcsMount | None:
+    if gcs_uri_base and gcs_mount_root is not None:
+        return GcsMount(gcs_mount_root.expanduser().resolve(), gcs_uri_base.rstrip("/"))
+
+    resolved_dirs = [path.resolve() for path in cohort_dirs]
+    candidates = []
+    for mount_point, filesystem_type, _ in parse_mountinfo():
+        if filesystem_type != "fuse.gcsfuse":
+            continue
+        try:
+            if all(path.is_relative_to(mount_point) for path in resolved_dirs):
+                candidates.append(mount_point)
+        except ValueError:
+            continue
+
+    if not candidates:
+        return None
+    mount_root = max(candidates, key=lambda path: len(path.parts)).resolve()
+
+    for mount in gcsfuse_process_mounts():
+        if mount.mount_root == mount_root:
+            return mount
+    return None
 
 
 def gcs_uri_for_cohort_dir(cohort_dir: Path, gcs_uri_base: str, gcs_mount_root: Path) -> str:
@@ -594,15 +723,20 @@ def main() -> None:
     manifest_path = sheets_dir / args.manifest_file
 
     cohort_dirs = resolve_cohort_dirs(data_dir, args.cohort_dir, cohort_zips)
-    if should_use_gcs_listing(args):
-        if not args.gcs_uri_base or args.gcs_mount_root is None:
-            raise ValueError("--gcs-uri-base and --gcs-mount-root are required for GCS listing.")
-        gcs_mount_root = args.gcs_mount_root.expanduser().resolve()
+    gcs_mount = infer_gcs_mount(cohort_dirs, args.gcs_uri_base, args.gcs_mount_root)
+    if args.listing_backend == "gcs" and gcs_mount is None:
+        raise ValueError(
+            "--listing-backend gcs requires --gcs-uri-base and --gcs-mount-root "
+            "when the Cloud Storage FUSE mount cannot be inferred."
+        )
+
+    if args.listing_backend == "gcs" or (args.listing_backend == "auto" and gcs_mount is not None):
+        assert gcs_mount is not None
         raw_entries = scan_cohort_zips(cohort_zips, args.project) + scan_cohort_dirs_with_gcs_listing(
             cohort_dirs,
             args.project,
-            args.gcs_uri_base,
-            gcs_mount_root,
+            gcs_mount.uri_base,
+            gcs_mount.mount_root,
         )
         listing_backend = "gcs"
     else:
@@ -801,6 +935,8 @@ def main() -> None:
         "cohort_zips": [path.name for path in cohort_zips],
         "cohort_dirs": [path.name for path in cohort_dirs],
         "listing_backend": listing_backend,
+        "gcs_uri_base": gcs_mount.uri_base if gcs_mount else "",
+        "gcs_mount_root": str(gcs_mount.mount_root) if gcs_mount else "",
         "extract_enabled": args.extract,
         "stage_mode": stage_mode,
         "raw_entry_count": len(raw_entries),
@@ -825,6 +961,9 @@ def main() -> None:
     print(f"Cohort zips: {[path.name for path in cohort_zips]}")
     print(f"Cohort dirs: {[path.name for path in cohort_dirs]}")
     print(f"Listing backend: {listing_backend}")
+    if gcs_mount is not None:
+        print(f"GCS URI base: {gcs_mount.uri_base}")
+        print(f"GCS mount root: {gcs_mount.mount_root}")
     print(f"Raw root: {raw_root}")
     print(f"Output root: {out_root}")
     print(f"Extract enabled: {args.extract}")

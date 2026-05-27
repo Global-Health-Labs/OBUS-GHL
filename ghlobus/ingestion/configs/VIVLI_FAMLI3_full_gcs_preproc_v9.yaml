@@ -34,7 +34,6 @@ processing:
   batch_size: 1000
   post_batch:
     enabled: true
-    manifest_dir: /mnt/localssd/vivli_out_full/batch_manifests/VIVLI_FAMLI3
     command:
       - python3
       - /workspace/code/OBUS-GHL/ghlobus/ingestion/upload_batch_manifest_to_gcs.py

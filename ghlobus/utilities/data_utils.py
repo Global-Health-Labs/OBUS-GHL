@@ -671,17 +671,19 @@ def extract_rgb_frames(
     # Grab the frames as np.ndarray
     frames = dcm.pixel_array
 
-    # get dimensions and shape
-    dims = len(frames.shape)
+    # Normalize logged shape to (n,c,h,w). Unexpected decoded shapes should
+    # become skipped rows, not batch-killing exceptions.
+    raw_shape = tuple(frames.shape)
+    dims = len(raw_shape)
 
-    # Get dimensions of the frames
-    if dims == 3:
-        shape = frames.shape + (1,)
+    if dims == 2:
+        shape = (1, 1, raw_shape[0], raw_shape[1])
+    elif dims == 3:
+        shape = (raw_shape[0], 1, raw_shape[1], raw_shape[2])
+    elif dims == 4:
+        shape = (raw_shape[0], raw_shape[3], raw_shape[1], raw_shape[2])
     else:
-        shape = frames.shape
-
-    # permute the shape to (n,c,h,w) instead of (n,h,w,c)
-    shape = tuple(np.array(shape)[[0, 3, 1, 2]])
+        shape = BAD_SHAPE
 
     # find number of frames
     num_frames = shape[0]

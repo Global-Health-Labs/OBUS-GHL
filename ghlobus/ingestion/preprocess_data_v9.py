@@ -255,10 +255,13 @@ def main():
         else:
             info['image'][fmt] = None
 
+    parallel_backend = info["processing"].get("backend", "loky")
+
     # print information about preprocessing run
     print_string = f"Data will be written here {out_dir},\n"
     print_string += f"Prototype file is {info['output']['out_file']},\n"
     print_string += f"Using {info['processing']['cores']} CPU cores,\n"
+    print_string += f"Parallel backend is {parallel_backend},\n"
     print_string += f"Target alpha is {info['image']['alpha']},\n"
     print_string += f"Number of channels is {info['image']['channels']},\n"
     print_string += f"Frame dimensions is {(info['image']['img_size'],)*2}."
@@ -411,7 +414,11 @@ def main():
         # Launch job; get list of results
         if info['processing']['cores'] > 1:
             # Configure parallelization
-            par_job = Parallel(n_jobs=info['processing']['cores'], verbose=True)
+            par_job = Parallel(
+                n_jobs=info["processing"]["cores"],
+                backend=parallel_backend,
+                verbose=True,
+            )
 
             # process this batch in parallel to a list of dataframes
             batch_shape_df_lst = par_job(delayed(preprocess_with_args)(f)

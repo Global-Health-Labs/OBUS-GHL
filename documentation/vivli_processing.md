@@ -97,6 +97,69 @@ python ghlobus/ingestion/preprocess_data_v9.py \
   --yaml ghlobus/ingestion/configs/VIVLI_FAMLI3_preproc_v9.yaml
 ```
 
+## Downstream Curation
+
+After preprocessing has produced `VIVLI_FAMLI3_prototype.csv`, the Vivli v9
+curation runner builds exam metadata, merges it onto the preprocessed
+prototype, and writes task-ready GA, FP, EFW, and Twin splits.
+
+Required inputs:
+
+- `C3_CRF.csv` and `C3_SR.csv`, either in the structured-data zip or an
+  expanded structured-data directory.
+- `<out_root>/sheets/VIVLI_FAMLI3_prototype.csv` from preprocessing.
+- Preprocessed video tensors under the configured raw/project output root.
+
+Update the paths in these configs before running outside the default
+`/data/...` layout:
+
+- [VIVLI_FAMLI3_sr_crf_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_sr_crf_v9.yaml)
+- [VIVLI_FAMLI3_prototype_curated_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_prototype_curated_v9.yaml)
+- [VIVLI_FAMLI3_efw_data_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_efw_data_v9.yaml)
+- [VIVLI_FAMLI3_twin_data_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_twin_data_v9.yaml)
+- [VIVLI_FAMLI3_ga_split_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_ga_split_v9.yaml)
+- [VIVLI_FAMLI3_fp_split_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_fp_split_v9.yaml)
+- [VIVLI_FAMLI3_efw_split_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_efw_split_v9.yaml)
+- [VIVLI_FAMLI3_twin_split_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_twin_split_v9.yaml)
+
+Run the full downstream flow from the repository root:
+
+```bash
+cd ghlobus/ingestion
+./run_vivli_curation_v9.sh
+```
+
+The runner executes:
+
+1. Vivli SR/CRF exam curation.
+2. Prototype plus exam metadata merge.
+3. EFW and Twin v9 selection.
+4. GA, FP, EFW, and Twin patient-level train/val/test split generation.
+
+Main outputs:
+
+- `<out_root>/sheets/VIVLI_FAMLI3_Exam_Data.csv`
+- `<out_root>/sheets/VIVLI_FAMLI3_prototype_curated.csv`
+- `<out_root>/sheets/VIVLI_FAMLI3_prototype_efw_selected.csv`
+- `<out_root>/sheets/VIVLI_FAMLI3_prototype_twin_selected.csv`
+- `<out_root>/splits/GA_T75_V10_H15/GA_100/{train,val,test}.csv`
+- `<out_root>/splits/FP_T75_V10_H15/FP_100/{train,val,test}.csv`
+- `<out_root>/splits/EFW_T75_V10_H15/EFW_100/{train,val,test}.csv`
+- `<out_root>/splits/TWIN_T75_V10_H15/TWIN_100/{train,val,test}.csv`
+
+The curated prototype normalizes task fields used by the split step:
+
+- `GA`: SR `ega` preferred, with CRF `ega` as fallback.
+- `BPD`, `HC`, `AC`, `FL`, `CRL`: SR means preferred, with CRF ultrasound
+  biometric columns as fallback.
+- `EFW`: from CRF `us_efw`.
+- `NOF`: derived from available twin and multiple-gestation fields.
+- `lie`: binary fetal presentation label where `0` is cephalic and `1` is
+  non-cephalic; missing, unknown, and variable lie values are excluded.
+
+The task split step keeps only `Good_video` rows, writes non-empty `outpath`
+values, and splits at patient level to reduce leakage.
+
 ## Batch Handoff
 
 `preprocess_data_v9.py` can write a per-batch manifest and run a configured

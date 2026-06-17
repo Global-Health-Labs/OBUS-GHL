@@ -1,0 +1,26 @@
+seed: 42
+
+input:
+  root_dir: /data/ML-Project-Data/VIVLI/Datasets/v9
+  data_dir: data
+  project: VIVLI_FAMLI3
+  file: VIVLI_FAMLI3_prototype_efw_selected.csv
+
+output:
+  root_dir: /data/ML-Project-Data/VIVLI/Datasets/v9/splits
+  folder: EFW_T75_V10_H15
+  distribution: EFW_100
+
+task:
+  name: EFW
+
+splits:
+  train:
+    fraction: 0.75
+    tags: transverse
+  val:
+    fraction: 0.10
+    tags: transverse
+  test:
+    fraction: -1
+    tags: vertical

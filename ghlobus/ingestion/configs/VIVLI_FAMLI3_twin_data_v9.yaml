@@ -1,0 +1,69 @@
+seed: 42
+
+input:
+  in_dir: /data/ML-Project-Data/VIVLI/Datasets/v9
+  project: VIVLI_FAMLI3
+
+output:
+  out_file: VIVLI_FAMLI3_prototype_twin_selected.csv
+  intermediate_file: VIVLI_FAMLI3_prototype_twin_base.csv
+
+selection:
+  out_col: TWIN
+  twins:
+    patients: null
+    include:
+      columns:
+        - NOF
+      values:
+        - 2
+        - 3
+      operation: or
+    label: 1
+  singles:
+    patients: null
+    label: 0
+    enforce:
+      columns:
+        - GA, ega
+        - tag
+      operation: and
+    tags:
+      column: tag
+      include_biometric: true
+      include_unknown: false
+
+it_file:
+  filename: VIVLI_FAMLI3_prototype_curated.csv
+  columns:
+    - PID
+    - StudyID
+    - filename
+    - Manufacturer
+    - ManufacturerModelName
+    - tag
+    - file_type
+    - NOF
+    - CRL
+    - BPD
+    - HC
+    - AC
+    - FL
+    - GA
+    - EFW
+    - ega
+    - lie
+    - exam_dir
+    - orig_frames
+    - orig_channels
+    - orig_height
+    - orig_width
+    - scal_frames
+    - scal_channels
+    - scal_height
+    - scal_width
+    - bbox_x0
+    - bbox_y0
+    - bbox_x1
+    - bbox_y1
+    - fail_reason

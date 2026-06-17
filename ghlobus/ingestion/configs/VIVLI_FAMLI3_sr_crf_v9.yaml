@@ -1,0 +1,11 @@
+mode: exam
+
+input:
+  root_dir: /data/ML-Raw-Data/VIVLI/FAMLI3
+  structured_source: Vivli-UNC-FAMLI3Twins-StructuredData-19-Feb-2026.zip
+  crf_file: C3_CRF.csv
+  sr_file: C3_SR.csv
+
+output:
+  out_dir: /data/ML-Project-Data/VIVLI/Datasets/v9
+  out_file: VIVLI_FAMLI3_Exam_Data.csv

@@ -1,0 +1,62 @@
+seed: 42
+
+input:
+  in_dir: /data/ML-Project-Data/VIVLI/Datasets/v9
+
+output:
+  out_file: VIVLI_FAMLI3_prototype_efw_selected.csv
+  intermediate_file: VIVLI_FAMLI3_prototype_efw_base.csv
+
+selection:
+  out_col: use_for_efw
+  enforce:
+    columns:
+      - GA
+      - BPD
+      - HC
+      - AC
+      - FL
+      - EFW
+      - tag
+    operation: and
+  tags:
+    column: tag
+    include_biometric: true
+    include_unknown: false
+  consistency: null
+  hadlock_threshold: 100
+
+it_file:
+  filename: VIVLI_FAMLI3_prototype_curated.csv
+  columns:
+    - PID
+    - StudyID
+    - filename
+    - Manufacturer
+    - ManufacturerModelName
+    - tag
+    - file_type
+    - CRL
+    - BPD
+    - HC
+    - AC
+    - FL
+    - GA
+    - EFW
+    - ega
+    - NOF
+    - lie
+    - exam_dir
+    - orig_frames
+    - orig_channels
+    - orig_height
+    - orig_width
+    - scal_frames
+    - scal_channels
+    - scal_height
+    - scal_width
+    - bbox_x0
+    - bbox_y0
+    - bbox_x1
+    - bbox_y1
+    - fail_reason

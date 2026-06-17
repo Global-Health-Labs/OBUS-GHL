@@ -1,0 +1,10 @@
+mode: prototype
+
+input:
+  in_dir: /data/ML-Project-Data/VIVLI/Datasets/v9
+  prototype_file: VIVLI_FAMLI3_prototype.csv
+  exam_file: VIVLI_FAMLI3_Exam_Data.csv
+
+output:
+  out_dir: /data/ML-Project-Data/VIVLI/Datasets/v9
+  out_file: VIVLI_FAMLI3_prototype_curated.csv

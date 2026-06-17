@@ -1,0 +1,26 @@
+seed: 42
+
+input:
+  root_dir: /data/ML-Project-Data/VIVLI/Datasets/v9
+  data_dir: data
+  project: VIVLI_FAMLI3
+  file: VIVLI_FAMLI3_prototype_curated.csv
+
+output:
+  root_dir: /data/ML-Project-Data/VIVLI/Datasets/v9/splits
+  folder: GA_T75_V10_H15
+  distribution: GA_100
+
+task:
+  name: GA
+
+splits:
+  train:
+    fraction: 0.75
+    tags: null
+  val:
+    fraction: 0.10
+    tags: null
+  test:
+    fraction: -1
+    tags: null

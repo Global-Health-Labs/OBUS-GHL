@@ -1,0 +1,26 @@
+seed: 42
+
+input:
+  root_dir: /data/ML-Project-Data/VIVLI/Datasets/v9
+  data_dir: data
+  project: VIVLI_FAMLI3
+  file: VIVLI_FAMLI3_prototype_curated.csv
+
+output:
+  root_dir: /data/ML-Project-Data/VIVLI/Datasets/v9/splits
+  folder: FP_T75_V10_H15
+  distribution: FP_100
+
+task:
+  name: FP
+
+splits:
+  train:
+    fraction: 0.75
+    tags: transverse
+  val:
+    fraction: 0.10
+    tags: transverse
+  test:
+    fraction: -1
+    tags: vertical

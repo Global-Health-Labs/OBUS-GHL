@@ -188,3 +188,117 @@ The default manifest location is `<out_dir>/batch_manifests/<project>` if
 - Update the paths in [VIVLI_FAMLI3_preproc_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_preproc_v9.yaml) for your VM or container before running preprocessing.
 - The bridge script is deliberately conservative. It favors producing a usable preprocessing sheet over forcing Vivli through the full SR/CRF merge pipeline.
 - Users do not need to manually rearrange expanded cohort folders; the staging script detects study folders and rebuilds the expected `YYYY-MM/study_key` layout itself.
+
+## Label and artifact contracts
+
+EFW training consumes standardized `log_AC`, `log_FL`, `log_HC`, and
+`log_BPD` columns. These use the existing v9 biometry mean/std constants
+shared with prediction decoding in `ghlobus.utilities.normalization`.
+They intentionally do not fit new Vivli biometry statistics: doing so would
+require updating checkpoint decoding as well. `z_log_*` columns are aliases
+for those standardized values; `raw_log_*` columns contain the unscaled logs.
+GA uses the shared legacy v4 constants so the existing dataloader does not
+change labels when it reloads the splits. Other normalized labels retain their
+training-split statistics.
+`normalization.json` beside each split records the applied means, standard
+deviations, source, and normalized column names. Keep this file with the
+dataset used for a training run.
+
+Regenerate existing Vivli EFW splits before training: older versions wrote
+raw logs into the `log_*` columns consumed by EFW training. These changes do
+not repair a model already trained with those incompatible labels.
+
+Tensor filenames strip only `.dcm` and `.mp4` (case insensitive). An
+extensionless DICOM UID such as `1.2.840.12345` becomes
+`1.2.840.12345.pt`. Preprocessing, batch manifests, and task splits share
+this convention. Regenerate splits with truncated UID paths; correctly
+named existing tensors do not need to be regenerated.
+
+## Resuming interrupted handoffs
+
+A batch CSV records processing completion, not upload completion. The
+preprocessor keeps the output manifest and writes an `.uploaded.json`
+receipt only after the post-batch command succeeds. On restart it retries
+pending handoffs before decoding subsequent batches, and finishes local
+cleanup for batches with matching receipts. Handoff commands must tolerate
+repeated execution: interruption after a remote upload but before its local
+receipt can cause a retry.
+
+Keep the local `logs/<project>` and `batch_manifests/<project>` directories
+when resuming, even when uploaded tensors are deleted locally. Batch logs,
+manifests, and receipts are published with atomic replacement. A run
+fingerprint binds checkpoints to the input sheet and configuration; use a
+separate output directory for changed inputs or configuration. Missing batch
+logs or logs inconsistent with the current input cause an explicit error.
+
+Older logs without receipts can resume if their local artifacts remain:
+they are validated against the current input and handed off again. If older
+runs already deleted artifacts without receipts, restore/reprocess those
+artifacts before resuming. Missing tensors are not treated as successful
+uploads. Local receipts certify successful command completion; they do not
+independently verify remote object integrity.
+
+## Staging conflicts, recovery, and patient IDs
+
+Each staged destination contributes at most one accepted metadata row. The
+first encountered entry is retained; subsequent entries targeting that path
+are recorded in the staging manifest with `duplicate_destination_conflict`
+and `conflict_with`. Review that manifest before using a delivery with
+conflicts. CSV reports are replaced atomically after writing completes.
+
+Copy and ZIP extraction write a temporary sibling file before atomically
+replacing the destination. An interrupted operation does not publish a partial
+new file. Existing files are skipped only after size and content validation:
+SHA-256 against the source for expanded files, and the archive member CRC for
+ZIP files. Resuming copy staging therefore reads existing source/destination
+content and can be I/O intensive on remote mounts. The symlink staging mode
+remains available for expanded datasets.
+
+Curation fills missing prototype patient IDs from exam metadata, validates a
+many-to-one study join, and rejects conflicting nonblank IDs. Rows still
+missing an ID produce a warning rather than silently disappearing during
+patient-level grouping. Regenerate curated prototypes and downstream splits
+to recover eligible rows from older runs. Twin-label selection and study
+spacing fallback behavior are unchanged.
+
+## GA compatibility and small validation batches
+
+Vivli splits expose `ga_boe` and `log_ga_boe` as compatibility aliases for
+Vivli `GA` and its raw log, because existing GA dataloaders and prediction
+writers require those column names. This does not change the label source:
+Vivli GA still comes from the documented SR/CRF precedence, not an independent
+BOE assessment. `z_log_ga` uses the legacy v4 constants shared with inference.
+Regenerate GA splits before using the existing datamodule.
+
+Batch targets are snapped to exam starts, then sorted and deduplicated with
+zero boundaries removed. Very small batch sizes can exceed their target to
+keep an exam together, but no longer create empty batches. Runs with older
+empty-batch logs should use a fresh validation output directory.
+
+## Cloud sample validation (2026-10-11 Pacific)
+
+Validated this working-tree snapshot on `vivli-preprocess-vm` in
+`famli-3-vivli`, using an isolated `/data/obus-validation-20261011` directory.
+Code archive SHA-256:
+`010657bf5dfea4833a5a0a7bb37fe7475bac5dfba40245e1a9129427d8a4b997`.
+Runtime: Python 3.10.12, torch 2.12.0+cu130, torchvision 0.27.0+cu130,
+pandas 2.3.3; CPU processing with two workers.
+
+The sample comprised three DICOM and three MP4 files across five studies.
+Four produced uint8 tensors shaped `(frames, 1, 288, 288)`; each tensor was
+exactly equal to its existing full-run reference. Two files were rejected
+(`Multichannel_shape_invalid`, `Invalid_ultrasound_region_dicom`); all six
+statuses matched the existing reference prototype. Resuming the run preserved
+all tensor hashes.
+
+A separate handoff check injected a subprocess failure before upload, verified
+that no receipt appeared, retried successfully against a new GCS prefix, then
+verified receipt reuse on replay. Four artifacts were uploaded and local
+outputs were retained. Aggregate evidence is under
+`gs://vivli-data/validation/20261011-data-contract-recovery/evidence/`.
+Production output objects were not changed.
+
+This is sampled preprocessing and handoff validation, not full-cohort coverage
+or a model-training test. The local regression suite passed 48 tests. Real
+GA/EFW dataloader and training smoke tests remain; the missing exam dataset
+classes must be resolved before claiming twin training validation.

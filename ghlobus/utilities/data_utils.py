@@ -40,6 +40,7 @@ from ghlobus.utilities.constants import BAD_BBOX
 from ghlobus.utilities.constants import GOOD_VIDEO_MSG
 from ghlobus.utilities.constants import DICOM_FILE_TYPE
 from ghlobus.utilities.constants import MP4_FILE_TYPE
+from ghlobus.utilities.paths import output_file_base_name
 
 config.settings.reading_validation_mode = config.IGNORE
 
@@ -260,11 +261,7 @@ def preprocess_video(file_info: pd.Series,
         # Writing at least something to disk
         write = True
         # Construct the base file name for writing output files
-        file_base_name = os.path.basename(in_filepath)
-        # Determine if there is an extension in the filename
-        if file_base_name[-3:] == DICOM_FILE_TYPE or \
-                file_base_name[-3:] == MP4_FILE_TYPE:
-            file_base_name = os.path.splitext(file_base_name)[0]
+        file_base_name = output_file_base_name(in_filepath)
 
     # Look for the input file
     if not os.path.isfile(in_filepath):
@@ -1309,7 +1306,7 @@ def construct_outpath(df_row: pd.Series,
         str:                Full path to the data file.
     """
     # get the file basename
-    file_basename = os.path.splitext(df_row['filename'])[0]
+    file_basename = output_file_base_name(df_row['filename'])
     outpath = os.path.join(
         root_dir,
         data_dir,

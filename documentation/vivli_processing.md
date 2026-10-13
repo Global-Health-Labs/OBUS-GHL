@@ -302,3 +302,46 @@ This is sampled preprocessing and handoff validation, not full-cohort coverage
 or a model-training test. The local regression suite passed 48 tests. Real
 GA/EFW dataloader and training smoke tests remain; the missing exam dataset
 classes must be resolved before claiming twin training validation.
+
+## Committed GA/EFW training smoke (2026-10-12 Pacific)
+
+Commit `4a8906caf3a260dd0dd696b8e3715d61686900ff` passed real GA and EFW
+video dataloader and Lightning training smoke tests on the existing CPU VM.
+The deployment used `git archive`; local and remote archive SHA-256 matched:
+`8a74d20616ec14010f4ce7206cd1f72cff44c9a7177306f3dcd0087ec1799dd4`.
+No source modifications were required on the VM.
+
+Both task splits were regenerated from existing FAMLI3 cloud metadata using
+the committed split code and task configurations. Four training videos and
+two validation videos per task were selected from distinct patients, with no
+train/validation patient overlap. Existing processed tensors supplied the
+images. Generated GA splits contained 166,647 training and 22,134 validation
+rows; EFW contained 77,010 training and 10,049 validation rows.
+
+The actual video datamodule produced input shape `(2, 2, 3, 256, 256)`, GA
+labels `(2,)`, and EFW labels `(2, 4)`. All inputs and labels were finite;
+loaded normalized labels matched the shared GA/biometry constants.
+The repository's Lightning CLI and configured model architectures ran one
+epoch, limited to two training batches and one validation batch, with two
+frames per video. GA used EfficientNet V2 S with basic additive attention;
+EFW used MobileNet V2 with eight additive attention modules. CSV logging
+replaced external experiment logging, and checkpointing was disabled.
+
+Both runs exited successfully with finite epoch losses:
+
+| Task | Training loss | Validation loss |
+| --- | ---: | ---: |
+| GA | 0.995563 | 0.828135 |
+| EFW | 0.591288 | 0.760351 |
+
+These losses confirm execution only; the tiny sample and short run do not
+measure predictive performance. Runtime: Python 3.10.12, torch 2.12.0,
+torchvision 0.27.0, lightning 2.1.0, pandas 2.3.3, numpy 1.26.4.
+GPU/mixed precision, full-length video training, full-cohort execution, and
+twin exam training were not tested.
+
+Reproduction scripts, generated configs, CSV metrics, logs, and aggregate
+summaries are saved at
+`gs://vivli-data/validation/20261012-4a8906c-training/evidence/`.
+Persistent VM workspace: `/data/obus-training-4a8906c-20261012`.
+Production outputs were not changed.

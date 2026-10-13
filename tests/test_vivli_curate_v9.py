@@ -91,3 +91,33 @@ def test_build_curated_prototype_preserves_preprocessing_columns():
     assert out.loc[0, "fail_reason"] == "Good_video"
     assert out.loc[0, "GA"] == 101
     assert out.loc[0, "lie"] == 0
+
+
+def test_curated_prototype_recovers_blank_patient_id():
+    prototype = pd.DataFrame({'StudyID': ['S1', 'S1'], 'PID': ['', None]})
+    exam = pd.DataFrame({'StudyID': ['S1'], 'PID': ['P1'], 'GA': [100]})
+    result = build_curated_prototype(prototype, exam)
+    assert result.PID.tolist() == ['P1', 'P1']
+    assert result.groupby('PID').size().to_dict() == {'P1': 2}
+
+
+def test_curated_prototype_rejects_conflicting_patient_ids():
+    import pytest
+    with pytest.raises(ValueError, match='Conflicting'):
+        build_curated_prototype(pd.DataFrame({'StudyID': ['S1'], 'PID': ['P1']}),
+                                pd.DataFrame({'StudyID': ['S1'], 'PID': ['P2']}))
+
+
+def test_curated_prototype_reports_unresolved_ids():
+    import pytest
+    with pytest.warns(UserWarning, match='1 prototype rows'):
+        result = build_curated_prototype(pd.DataFrame({'StudyID': ['S1'], 'PID': ['']}),
+                                         pd.DataFrame({'StudyID': ['S2'], 'PID': ['P2']}))
+    assert result.PID.tolist() == ['']
+
+
+def test_curated_prototype_rejects_duplicate_exam_keys():
+    import pytest
+    with pytest.raises(pd.errors.MergeError):
+        build_curated_prototype(pd.DataFrame({'StudyID': ['S1'], 'PID': ['']}),
+                                pd.DataFrame({'StudyID': ['S1', 'S1'], 'PID': ['P1', 'P2']}))

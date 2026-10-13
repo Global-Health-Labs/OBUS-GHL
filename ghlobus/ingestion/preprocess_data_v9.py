@@ -22,6 +22,9 @@ This software is licensed under the MIT license. See LICENSE.txt in the root of
 the repository for details.
 """
 import os
+import hashlib
+import json
+from pathlib import Path
 import shutil
 import subprocess
 import yaml
@@ -34,22 +37,8 @@ from glob import glob
 from functools import partial
 from joblib import Parallel, delayed
 
-from ghlobus.utilities.data_utils import read_spreadsheet
-from ghlobus.utilities.data_utils import preprocess_video
-from ghlobus.utilities.data_utils import create_video_df
-from ghlobus.utilities.data_utils import fail_reason_acronym
-from ghlobus.utilities.data_utils import GOOD_VIDEO_MSG
-from ghlobus.utilities.constants import META_DIR
-
-
-def output_file_base_name(filename: str) -> str:
-    """
-    Match preprocess_video's output base-name convention.
-    """
-    file_base_name = os.path.basename(filename)
-    if file_base_name.lower().endswith(('.dcm', '.mp4')):
-        file_base_name = os.path.splitext(file_base_name)[0]
-    return file_base_name
+from ghlobus.utilities.constants import META_DIR, GOOD_VIDEO_MSG
+from ghlobus.utilities.paths import output_file_base_name
 
 
 def out_folder_name(df: pd.DataFrame) -> pd.Series:
@@ -115,6 +104,7 @@ def batch_output_paths(batch_df: pd.DataFrame,
                     output_paths.append(local_path)
             else:
                 local_dir = os.path.join(out_dir, raw_folder, project + "_bad")
+                from ghlobus.utilities.data_utils import fail_reason_acronym
                 try:
                     reason = fail_reason_acronym(row['fail_reason'])
                 except KeyError:
@@ -142,9 +132,7 @@ def write_batch_manifest(batch_idx: int | str,
     else:
         manifest_name = f"{batch_idx}_outputs.txt"
     manifest_path = os.path.join(manifest_dir, manifest_name)
-    with open(manifest_path, "w") as handle:
-        handle.write("\n".join(output_paths))
-        handle.write("\n")
+    atomic_write(manifest_path, "\n".join(output_paths) + "\n")
     return manifest_path
 
 
@@ -205,8 +193,83 @@ def delete_batch_outputs(output_paths: list[str],
             parent_dir = os.path.dirname(parent_dir)
 
 
+def compute_batch_ends(exam_starts, n_videos: int, batch_size: int) -> list[int]:
+    """Return increasing nonempty batch ends without splitting exams."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if n_videos <= 0:
+        raise ValueError("No input videos to preprocess")
+    boundaries = np.asarray(sorted(set(int(x) for x in exam_starts)))
+    targets = range(batch_size, n_videos, batch_size)
+    ends = {int(boundaries[np.argmin(np.abs(boundaries - target))]) for target in targets}
+    return sorted(end for end in ends if 0 < end < n_videos) + [n_videos]
+
+
+def atomic_write(path: str, text: str) -> None:
+    """Publish checkpoint state only after the complete file has been written."""
+    temporary = path + ".tmp"
+    with open(temporary, "w") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def handoff_batch(batch_idx: int, batch_df: pd.DataFrame, batch_log_path: str,
+                  out_dir: str, project: str, folders: dict,
+                  manifest_dir: str, post_batch: dict) -> None:
+    """Replay pending uploads; a processing log is not an upload receipt."""
+    if not post_batch.get("enabled", False):
+        return
+    manifest_path = os.path.join(manifest_dir, f"batch_{batch_idx:03d}_outputs.txt")
+    if not os.path.exists(manifest_path):
+        # Supports pre-receipt logs, provided their outputs are still local.
+        output_paths = batch_output_paths(batch_df, out_dir, project, folders)
+        manifest_path = write_batch_manifest(batch_idx, output_paths, manifest_dir)
+    output_paths = Path(manifest_path).read_text().splitlines()
+    output_paths = [path for path in output_paths if path]
+    command = post_batch.get("command", [])
+    if not command:
+        return
+
+    receipt_path = manifest_path + ".uploaded.json"
+    signature = hashlib.sha256(
+        Path(batch_log_path).read_bytes() + Path(manifest_path).read_bytes()
+        + json.dumps(command).encode()
+    ).hexdigest()
+    uploaded = False
+    if os.path.exists(receipt_path):
+        uploaded = json.loads(Path(receipt_path).read_text()).get("signature") == signature
+    if not uploaded:
+        # Never turn a missing/deleted artifact into an apparently successful upload.
+        required = set(output_paths)
+        if folders.get("pt") is not None:
+            for _, row in batch_df.iterrows():
+                if row["fail_reason"] == GOOD_VIDEO_MSG:
+                    required.add(os.path.join(
+                        out_dir, folders["pt"], project, row["exam_dir"],
+                        output_file_base_name(row["filename"]) + ".pt"))
+        missing = [path for path in required if not os.path.isfile(path)]
+        unlisted = required - set(output_paths)
+        if missing or unlisted:
+            raise RuntimeError(
+                f"Batch {batch_idx} has no matching upload receipt and missing or "
+                "unmanifested outputs. Restore/reprocess its local artifacts before "
+                f"resuming. Missing: {missing}; unmanifested: {sorted(unlisted)}"
+            )
+        run_post_batch_command(command, batch_idx, manifest_path, batch_log_path, out_dir)
+        atomic_write(receipt_path, json.dumps({"signature": signature}) + "\n")
+    # A crash during cleanup is safe: the receipt permits cleanup on restart.
+    if post_batch.get("delete_local_outputs", False):
+        delete_batch_outputs(output_paths, out_dir)
+
+
 # noinspection PyUnboundLocalVariable
 def main():
+    from ghlobus.utilities.data_utils import (
+        read_spreadsheet, preprocess_video, create_video_df,
+    )
+
     # Default yaml file
     DEFAULT_YAML = "configs/FAMLI2_preproc_v9.yaml"
 
@@ -338,41 +401,47 @@ def main():
         os.makedirs(out_path, exist_ok=True)
         print(f"Created raw folder {out_path}.")
 
-    # determine number of videos
+    # Snap targets to exam boundaries, but never emit empty or reversed batches.
     n_videos = it_df.shape[0]
-    # batches should be at every batch_size # videos (approximately)
-    target_inds = list(np.arange(0, n_videos, info['processing']['batch_size'])[1:])
-    # match up target indices and exam boundaries
-    batch_end = [uniq_inds[np.argmin(np.abs(uniq_inds - ind))]
-                 for ind in target_inds] + \
-                [n_videos]
+    batch_end = compute_batch_ends(uniq_inds, n_videos, info['processing']['batch_size'])
     n_batches = len(batch_end)
     batch_dfs = [None for _ in range(n_batches)]
 
-    # create log folder for keeping track of processing state
+    # Checkpoints belong to a specific input sheet and processing configuration.
     log_dir = os.path.join(out_dir, 'logs', project)
-    if not os.path.exists(log_dir):
-        # log folder does not exist, create it
-        os.makedirs(log_dir, exist_ok=True)
-        start_batch = 0
-    else:
-        # read the log and determine what batch # to start at
-        # if the log is empty, start at 0
-        log_files = glob(os.path.join(log_dir, "*.csv"))
-        if len(log_files) == 0:
-            # log directory is empty, # start at 0
-            start_batch = 0
-        else:
-            # read the batches into batch_dfs
-            print(f"Found {len(log_files)} log files in {log_dir}.")
-            logged_batch_indices = []
-            for log_file in log_files:
-                batch_idx = int(os.path.basename(log_file).split('_')[-1].split('.')[0])
-                batch_dfs[batch_idx] = pd.read_csv(log_file)
-                logged_batch_indices.append(batch_idx)
-            # determine last batch number from file name
-            start_batch = max(logged_batch_indices) + 1
-            print(f"Starting process at batch {start_batch}.")
+    os.makedirs(log_dir, exist_ok=True)
+    state_path = os.path.join(log_dir, "run_state.json")
+    fingerprint = hashlib.sha256(
+        Path(it_path).read_bytes() + json.dumps(info, sort_keys=True).encode()
+    ).hexdigest()
+    if os.path.exists(state_path):
+        previous = json.loads(Path(state_path).read_text())
+        if previous.get("fingerprint") != fingerprint:
+            raise ValueError("Input/configuration changed since preprocessing began. "
+                             "Use a separate output directory for the new run.")
+
+    log_files = sorted(glob(os.path.join(log_dir, "batch_*.csv")),
+                       key=lambda path: int(Path(path).stem.split("_")[-1]))
+    logged_indices = [int(Path(path).stem.split("_")[-1]) for path in log_files]
+    if logged_indices != list(range(len(logged_indices))) or len(log_files) > n_batches:
+        raise ValueError("Batch logs are not a contiguous prefix of this run; "
+                         "restore the missing logs before resuming.")
+    for batch_idx, log_file in enumerate(log_files):
+        logged = pd.read_csv(log_file, dtype=str, keep_default_na=False)
+        begin = 0 if batch_idx == 0 else batch_end[batch_idx - 1]
+        expected = it_df.iloc[begin:batch_end[batch_idx]].reset_index(drop=True)
+        # Also validate legacy logs that predate run fingerprints.
+        columns = list(expected.columns)
+        if not set(columns).issubset(logged.columns) or not logged[columns].equals(
+                expected.fillna("").astype(str)):
+            raise ValueError(f"Batch {batch_idx} log does not match the current input rows.")
+        batch_dfs[batch_idx] = logged
+    atomic_write(state_path, json.dumps({"fingerprint": fingerprint}) + "\n")
+    for batch_idx, log_file in enumerate(log_files):
+        handoff_batch(batch_idx, batch_dfs[batch_idx], log_file, out_dir, project,
+                      info['output']['folders'], batch_manifest_dir, post_batch)
+    start_batch = len(log_files)
+    print(f"Starting process at batch {start_batch}.")
 
     # determine the beginning video index for the first batch
     if start_batch == 0:
@@ -450,33 +519,11 @@ def main():
 
         # write this batch's dataframe to a log file
         batch_log_path = os.path.join(log_dir, f"batch_{batch_idx:03d}.csv")
-        batch_df.to_csv(batch_log_path, index=False)
+        atomic_write(batch_log_path, batch_df.to_csv(index=False))
         print(f"Saved log for batch {batch_idx} to {batch_log_path}.")
 
-        # Optionally hand completed batch outputs to an external command.
-        if post_batch.get('enabled', False):
-            output_paths = batch_output_paths(
-                batch_df,
-                out_dir,
-                project,
-                info['output']['folders'],
-            )
-            manifest_path = write_batch_manifest(
-                batch_idx,
-                output_paths,
-                batch_manifest_dir,
-            )
-            command = post_batch.get('command', [])
-            if command:
-                run_post_batch_command(
-                    command,
-                    batch_idx,
-                    manifest_path,
-                    batch_log_path,
-                    out_dir,
-                )
-            if post_batch.get('delete_local_outputs', False):
-                delete_batch_outputs(output_paths, out_dir)
+        handoff_batch(batch_idx, batch_df, batch_log_path, out_dir, project,
+                      info['output']['folders'], batch_manifest_dir, post_batch)
 
         # append this batch's dataframe to the list of batch dataframes
         batch_dfs[batch_idx] = batch_df

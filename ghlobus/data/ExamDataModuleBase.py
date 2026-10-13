@@ -58,8 +58,6 @@ from ghlobus.utilities.sweep_utils import filter_by_known_combos
 
 # Local imports
 from ghlobus.data.ExamDatasetFrame import ExamDatasetFrame
-from ghlobus.data.ExamDatasetClip import ExamDatasetClip
-from ghlobus.data.ExamDatasetVideo import ExamDatasetVideo
 from ghlobus.utilities.sample_utils import compute_equal_sampling_weights_by_trimester
 
 
@@ -262,14 +260,7 @@ class ExamDataModuleBase(LightningDataModule):
             ds_kwargs['mode'] = 'val'
 
         # Step 2. Create the Dataset
-        if self.mil_format == 'frame':
-            dataset = ExamDatasetFrame(**ds_kwargs)
-        elif self.mil_format == 'clip':
-            dataset = ExamDatasetClip(**ds_kwargs)
-        elif self.mil_format == 'video':
-            dataset = ExamDatasetVideo(**ds_kwargs)
-        else:
-            raise ValueError(f"MIL format {self.mil_format} is not recognized.")
+        dataset = self._create_dataset(**ds_kwargs)
 
         # Step 3. Add a sampler, if using it. (Optional)
         if self.use_stratified_sampler and dataset_name == 'train':
@@ -307,14 +298,7 @@ class ExamDataModuleBase(LightningDataModule):
         ds_kwargs['mode'] = 'test'
 
         # Step 2. Create the Dataset
-        if self.mil_format == 'frame':
-            dataset = ExamDatasetFrame(**ds_kwargs)
-        elif self.mil_format == 'clip':
-            dataset = ExamDatasetClip(**ds_kwargs)
-        elif self.mil_format == 'video':
-            dataset = ExamDatasetVideo(**ds_kwargs)
-        else:
-            raise ValueError(f"MIL format {self.mil_format} is not recognized.")
+        dataset = self._create_dataset(**ds_kwargs)
 
         # Step 3. Copy the keyword parameters for DataLoader,
         dl_options = self.dl_options.copy()
@@ -325,3 +309,15 @@ class ExamDataModuleBase(LightningDataModule):
         dataloader = DataLoader(dataset, sampler=None, **dl_options)
 
         return dataloader
+
+    def _create_dataset(self, **kwargs):
+        """Import optional MIL datasets only when their format is selected."""
+        if self.mil_format == 'frame':
+            return ExamDatasetFrame(**kwargs)
+        if self.mil_format == 'clip':
+            from ghlobus.data.ExamDatasetClip import ExamDatasetClip
+            return ExamDatasetClip(**kwargs)
+        if self.mil_format == 'video':
+            from ghlobus.data.ExamDatasetVideo import ExamDatasetVideo
+            return ExamDatasetVideo(**kwargs)
+        raise ValueError(f"MIL format {self.mil_format} is not recognized.")

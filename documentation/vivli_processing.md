@@ -188,3 +188,207 @@ The default manifest location is `<out_dir>/batch_manifests/<project>` if
 - Update the paths in [VIVLI_FAMLI3_preproc_v9.yaml](/Users/dan/code/OBUS-GHL/ghlobus/ingestion/configs/VIVLI_FAMLI3_preproc_v9.yaml) for your VM or container before running preprocessing.
 - The bridge script is deliberately conservative. It favors producing a usable preprocessing sheet over forcing Vivli through the full SR/CRF merge pipeline.
 - Users do not need to manually rearrange expanded cohort folders; the staging script detects study folders and rebuilds the expected `YYYY-MM/study_key` layout itself.
+
+## Label and artifact contracts
+
+EFW training consumes standardized `log_AC`, `log_FL`, `log_HC`, and
+`log_BPD` columns. These use the existing v9 biometry mean/std constants
+shared with prediction decoding in `ghlobus.utilities.normalization`.
+They intentionally do not fit new Vivli biometry statistics: doing so would
+require updating checkpoint decoding as well. `z_log_*` columns are aliases
+for those standardized values; `raw_log_*` columns contain the unscaled logs.
+GA uses the shared legacy v4 constants so the existing dataloader does not
+change labels when it reloads the splits. Other normalized labels retain their
+training-split statistics.
+`normalization.json` beside each split records the applied means, standard
+deviations, source, and normalized column names. Keep this file with the
+dataset used for a training run.
+
+Regenerate existing Vivli EFW splits before training: older versions wrote
+raw logs into the `log_*` columns consumed by EFW training. These changes do
+not repair a model already trained with those incompatible labels.
+
+Tensor filenames strip only `.dcm` and `.mp4` (case insensitive). An
+extensionless DICOM UID such as `1.2.840.12345` becomes
+`1.2.840.12345.pt`. Preprocessing, batch manifests, and task splits share
+this convention. Regenerate splits with truncated UID paths; correctly
+named existing tensors do not need to be regenerated.
+
+## Resuming interrupted handoffs
+
+A batch CSV records processing completion, not upload completion. The
+preprocessor keeps the output manifest and writes an `.uploaded.json`
+receipt only after the post-batch command succeeds. On restart it retries
+pending handoffs before decoding subsequent batches, and finishes local
+cleanup for batches with matching receipts. Handoff commands must tolerate
+repeated execution: interruption after a remote upload but before its local
+receipt can cause a retry.
+
+Keep the local `logs/<project>` and `batch_manifests/<project>` directories
+when resuming, even when uploaded tensors are deleted locally. Batch logs,
+manifests, and receipts are published with atomic replacement. A run
+fingerprint binds checkpoints to the input sheet and configuration; use a
+separate output directory for changed inputs or configuration. Missing batch
+logs or logs inconsistent with the current input cause an explicit error.
+
+Older logs without receipts can resume if their local artifacts remain:
+they are validated against the current input and handed off again. If older
+runs already deleted artifacts without receipts, restore/reprocess those
+artifacts before resuming. Missing tensors are not treated as successful
+uploads. Local receipts certify successful command completion; they do not
+independently verify remote object integrity.
+
+## Staging conflicts, recovery, and patient IDs
+
+Each staged destination contributes at most one accepted metadata row. The
+first encountered entry is retained; subsequent entries targeting that path
+are recorded in the staging manifest with `duplicate_destination_conflict`
+and `conflict_with`. Review that manifest before using a delivery with
+conflicts. CSV reports are replaced atomically after writing completes.
+
+Copy and ZIP extraction write a temporary sibling file before atomically
+replacing the destination. An interrupted operation does not publish a partial
+new file. Existing files are skipped only after size and content validation:
+SHA-256 against the source for expanded files, and the archive member CRC for
+ZIP files. Resuming copy staging therefore reads existing source/destination
+content and can be I/O intensive on remote mounts. The symlink staging mode
+remains available for expanded datasets.
+
+Curation fills missing prototype patient IDs from exam metadata, validates a
+many-to-one study join, and rejects conflicting nonblank IDs. Rows still
+missing an ID produce a warning rather than silently disappearing during
+patient-level grouping. Regenerate curated prototypes and downstream splits
+to recover eligible rows from older runs. Twin-label selection and study
+spacing fallback behavior are unchanged.
+
+## GA compatibility and small validation batches
+
+Vivli splits expose `ga_boe` and `log_ga_boe` as compatibility aliases for
+Vivli `GA` and its raw log, because existing GA dataloaders and prediction
+writers require those column names. This does not change the label source:
+Vivli GA still comes from the documented SR/CRF precedence, not an independent
+BOE assessment. `z_log_ga` uses the legacy v4 constants shared with inference.
+Regenerate GA splits before using the existing datamodule.
+
+Batch targets are snapped to exam starts, then sorted and deduplicated with
+zero boundaries removed. Very small batch sizes can exceed their target to
+keep an exam together, but no longer create empty batches. Runs with older
+empty-batch logs should use a fresh validation output directory.
+
+## Cloud sample validation (2026-10-11 Pacific)
+
+Validated this working-tree snapshot on `vivli-preprocess-vm` in
+`famli-3-vivli`, using an isolated `/data/obus-validation-20261011` directory.
+Code archive SHA-256:
+`010657bf5dfea4833a5a0a7bb37fe7475bac5dfba40245e1a9129427d8a4b997`.
+Runtime: Python 3.10.12, torch 2.12.0+cu130, torchvision 0.27.0+cu130,
+pandas 2.3.3; CPU processing with two workers.
+
+The sample comprised three DICOM and three MP4 files across five studies.
+Four produced uint8 tensors shaped `(frames, 1, 288, 288)`; each tensor was
+exactly equal to its existing full-run reference. Two files were rejected
+(`Multichannel_shape_invalid`, `Invalid_ultrasound_region_dicom`); all six
+statuses matched the existing reference prototype. Resuming the run preserved
+all tensor hashes.
+
+A separate handoff check injected a subprocess failure before upload, verified
+that no receipt appeared, retried successfully against a new GCS prefix, then
+verified receipt reuse on replay. Four artifacts were uploaded and local
+outputs were retained. Aggregate evidence is under
+`gs://vivli-data/validation/20261011-data-contract-recovery/evidence/`.
+Production output objects were not changed.
+
+This is sampled preprocessing and handoff validation, not full-cohort coverage
+or a model-training test. The local regression suite passed 48 tests. Real
+GA/EFW dataloader and training smoke tests remain; the missing exam dataset
+classes must be resolved before claiming twin training validation.
+
+## Committed GA/EFW training smoke (2026-10-12 Pacific)
+
+Commit `4a8906caf3a260dd0dd696b8e3715d61686900ff` passed real GA and EFW
+video dataloader and Lightning training smoke tests on the existing CPU VM.
+The deployment used `git archive`; local and remote archive SHA-256 matched:
+`8a74d20616ec14010f4ce7206cd1f72cff44c9a7177306f3dcd0087ec1799dd4`.
+No source modifications were required on the VM.
+
+Both task splits were regenerated from existing FAMLI3 cloud metadata using
+the committed split code and task configurations. Four training videos and
+two validation videos per task were selected from distinct patients, with no
+train/validation patient overlap. Existing processed tensors supplied the
+images. Generated GA splits contained 166,647 training and 22,134 validation
+rows; EFW contained 77,010 training and 10,049 validation rows.
+
+The actual video datamodule produced input shape `(2, 2, 3, 256, 256)`, GA
+labels `(2,)`, and EFW labels `(2, 4)`. All inputs and labels were finite;
+loaded normalized labels matched the shared GA/biometry constants.
+The repository's Lightning CLI and configured model architectures ran one
+epoch, limited to two training batches and one validation batch, with two
+frames per video. GA used EfficientNet V2 S with basic additive attention;
+EFW used MobileNet V2 with eight additive attention modules. CSV logging
+replaced external experiment logging, and checkpointing was disabled.
+
+Both runs exited successfully with finite epoch losses:
+
+| Task | Training loss | Validation loss |
+| --- | ---: | ---: |
+| GA | 0.995563 | 0.828135 |
+| EFW | 0.591288 | 0.760351 |
+
+These losses confirm execution only; the tiny sample and short run do not
+measure predictive performance. Runtime: Python 3.10.12, torch 2.12.0,
+torchvision 0.27.0, lightning 2.1.0, pandas 2.3.3, numpy 1.26.4.
+GPU/mixed precision, full-length video training, full-cohort execution, and
+twin exam training were not tested.
+
+Reproduction scripts, generated configs, CSV metrics, logs, and aggregate
+summaries are saved at
+`gs://vivli-data/validation/20261012-4a8906c-training/evidence/`.
+Persistent VM workspace: `/data/obus-training-4a8906c-20261012`.
+Production outputs were not changed.
+
+## Twin exam smoke (2026-10-12 Pacific)
+
+Commit `5684df2021c1a2665fce15fd10fb7957e7fcd1e6` moves optional clip/video
+MIL imports into the selected dataset factory. Frame MIL imports and both
+training/inference dataloader factories now work without those optional
+implementations. The package exports exam datamodules directly, so unrelated
+import failures are no longer hidden by a broad `ModuleNotFoundError` handler.
+The local regression suite passed 51 tests.
+
+The exact committed archive was deployed to the CPU VM; its SHA-256 matched
+locally and remotely:
+`31b8e1e83443b3e149cae2b85a880929aa604c48a8029e8a04e33a1595639ed4`.
+Twin selection was regenerated from existing curated cloud metadata. Selected
+labels matched `NOF` in `{2, 3}` for positives, with the existing unknown-NOF
+singleton policy retained. All selected rows had patient IDs and consistent
+labels within each exam. Selection produced 201,470 videos: 5,006 positive and
+196,464 negative, from 56 twin patients and 2,840 singleton patients. Generated
+splits contained 77,370 training, 10,557 validation, and 13,609 test rows, with
+no patient overlap across splits.
+
+The real-media sample used four training exams (two per class) and two
+validation exams (one per class), each with six recognized sweeps: 36 videos
+total. Both classes were represented in each dataset. Exam dataloaders
+produced finite bags of shape `(2, 4, 3, 256, 256)` with integer labels `(2,)`.
+Source video/frame indices matched the corresponding exam and label. The
+inference-style validation factory returned `(1, 4, 3, 256, 256)`.
+
+The repository Lightning CLI ran the configured frame iMIL architecture
+(MobileNet V2, MIL attention, two-class classifier) for one epoch, limited to
+two training batches and one validation batch. Known-combination sampling and
+class upsampling were enabled. Bag size was reduced to four; GA balancing was
+disabled for the small sample. The unavailable prior twin checkpoint was
+omitted, using ImageNet initialization. CSV logging replaced external
+experiment logging; checkpointing was disabled. CPU float32 was used.
+
+Training loss was 0.679706 and validation loss was 0.700498; both were finite.
+These short runs verify execution rather than predictive performance. Runtime
+versions matched the GA/EFW smoke above. Clip/video MIL implementations remain
+absent and fail when explicitly selected. GPU/distributed/mixed-precision
+training, the prior twin checkpoint, GA-balanced upsampling, and full-size
+bags were not validated.
+
+Scripts, configs, metrics, logs, and aggregate summaries are saved at
+`gs://vivli-data/validation/20261012-5684df2-twin/evidence/`.
+Persistent VM workspace: `/data/obus-twin-5684df2-20261012`.
+Production outputs were not changed.

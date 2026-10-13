@@ -96,6 +96,7 @@ def GA_TASK(args, dicomlist, lmean, lstd):
         mode='GA',
         lmean=lmean,
         lstd=lstd,
+        physicalDeltaX=args.pdx,
     )
 
     # Step 5a. [Optional] Run exam-level inference for GA.
@@ -148,6 +149,7 @@ def FP_TASK(args, dicomlist, lmean, lstd):
         args.save_vectors,
         lmean=lmean,
         lstd=lstd,
+        physicalDeltaX=args.pdx,
     )
 
     # Step 5b. [Optional] Run exam-level inference for FP.

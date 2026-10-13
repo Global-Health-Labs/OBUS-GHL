@@ -17,6 +17,10 @@ The output metadata is designed to be consumed directly by
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
+import tempfile
+import zlib
 import csv
 import json
 import re
@@ -666,31 +670,70 @@ def prefer_spacing(row: dict[str, str]) -> tuple[str, str]:
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
-    if not rows:
-        path.write_text("", encoding="utf-8")
-        return
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
+    """Publish a complete CSV, including optional diagnostic fields."""
+    fields = list(dict.fromkeys(key for row in rows for key in row))
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as handle:
+            if rows:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(rows)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _checksum(path: Path, crc: bool = False):
+    digest = hashlib.sha256()
+    checksum = 0
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            if crc:
+                checksum = zlib.crc32(block, checksum)
+            else:
+                digest.update(block)
+    return checksum if crc else digest.digest()
+
+
+def _atomic_copy(source, destination: Path, expected_size: int) -> None:
+    fd, temporary = tempfile.mkstemp(dir=destination.parent,
+                                     prefix=destination.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as target:
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+        if os.path.getsize(temporary) != expected_size:
+            raise IOError(f"Incomplete staged file: {destination}")
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def ensure_extracted(zip_path: Path, zip_member: str, destination: Path) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        return "already_present"
-
     with zipfile.ZipFile(zip_path) as zf:
-        with zf.open(zip_member) as src, destination.open("wb") as dst:
-            shutil.copyfileobj(src, dst)
+        info = zf.getinfo(zip_member)
+        if (destination.is_file() and destination.stat().st_size == info.file_size
+                and _checksum(destination, crc=True) == info.CRC):
+            return "already_present"
+        # ZipExtFile checks the member CRC while the full member is read.
+        with zf.open(info) as source:
+            _atomic_copy(source, destination, info.file_size)
     return "extracted"
 
 
 def ensure_copied(source_path: Path, destination: Path) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
+    size = source_path.stat().st_size
+    if (destination.is_file() and destination.stat().st_size == size
+            and _checksum(source_path) == _checksum(destination)):
         return "already_present"
-    shutil.copy2(source_path, destination)
+    with source_path.open("rb") as source:
+        _atomic_copy(source, destination, size)
     return "copied"
 
 
@@ -888,8 +931,6 @@ def main() -> None:
         resolved_raw_entries.append((raw_entry, metadata))
 
     for raw_entry, metadata in resolved_raw_entries:
-        source_counter[str(metadata["metadata_source"])] += 1
-        metadata_rows.append(metadata)
         destination = raw_root / metadata["relpath"] / metadata["filename"]
         dest_key = str(destination)
         manifest_row = {
@@ -903,8 +944,9 @@ def main() -> None:
             "metadata_source": metadata["metadata_source"],
             "instance_match_reason": metadata["instance_match_reason"],
             "stage_action": "not_requested",
+            "conflict_with": "",
         }
-        if dest_key in seen_destinations and seen_destinations[dest_key] != raw_entry.source_path:
+        if dest_key in seen_destinations:
             manifest_row["stage_action"] = "duplicate_destination_conflict"
             manifest_row["conflict_with"] = seen_destinations[dest_key]
             stage_action_counter[manifest_row["stage_action"]] += 1
@@ -921,6 +963,8 @@ def main() -> None:
             else:
                 action = ensure_symlinked(Path(raw_entry.source_path), destination)
             manifest_row["stage_action"] = action
+        source_counter[str(metadata["metadata_source"])] += 1
+        metadata_rows.append(metadata)
         stage_action_counter[manifest_row["stage_action"]] += 1
         manifest_rows.append(manifest_row)
 

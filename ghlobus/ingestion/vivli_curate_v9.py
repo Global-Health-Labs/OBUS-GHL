@@ -8,6 +8,7 @@ format consumed by tablify_sr_v9.py. This module keeps the v9 curation shape
 while adding a Vivli-specific bridge for the wide SR/CRF tables.
 """
 import argparse
+import warnings
 import os
 import zipfile
 from typing import Iterable, Optional
@@ -175,8 +176,24 @@ def build_exam_metadata(crf_df: pd.DataFrame, sr_df: pd.DataFrame) -> pd.DataFra
 def build_curated_prototype(prototype_df: pd.DataFrame, exam_df: pd.DataFrame) -> pd.DataFrame:
     """Merge Vivli exam metadata onto the preprocessed prototype."""
     prototype = prototype_df.copy()
-    exam = exam_df.drop(columns=["PID"], errors="ignore").copy()
-    curated = prototype.merge(exam, on="StudyID", how="left", suffixes=("", "_exam"))
+    exam = exam_df.copy()
+    prototype["PID"] = prototype.get("PID", pd.Series("", index=prototype.index)).map(_clean_string)
+    exam["PID"] = exam.get("PID", pd.Series("", index=exam.index)).map(_clean_string)
+    if exam["StudyID"].map(_clean_string).eq("").any():
+        raise ValueError("Exam metadata contains blank StudyID values.")
+    curated = prototype.merge(exam, on="StudyID", how="left",
+                              suffixes=("", "_exam"), validate="many_to_one")
+    exam_pid = curated["PID_exam"].map(_clean_string)
+    conflict = curated["PID"].ne("") & exam_pid.ne("") & curated["PID"].ne(exam_pid)
+    if conflict.any():
+        studies = curated.loc[conflict, "StudyID"].unique().tolist()
+        raise ValueError(f"Conflicting prototype/exam patient IDs for studies: {studies}")
+    curated["PID"] = curated["PID"].where(curated["PID"].ne(""), exam_pid)
+    curated.drop(columns="PID_exam", inplace=True)
+    unresolved = curated["PID"].eq("")
+    if unresolved.any():
+        warnings.warn(f"{int(unresolved.sum())} prototype rows have unresolved patient IDs "
+                      "and cannot enter patient-level splits.", UserWarning, stacklevel=2)
     for col in ["GA", "ega", "CRL", "BPD", "HC", "AC", "FL", "EFW", "NOF", "lie"]:
         if col in curated.columns:
             curated[col] = pd.to_numeric(curated[col], errors="coerce")

@@ -4,6 +4,7 @@ vivli_task_split_v9.py
 Create patient-level train/val/test spreadsheets for Vivli task datasets.
 """
 import argparse
+import json
 import os
 import random
 from typing import Dict, Iterable, Optional
@@ -13,6 +14,8 @@ import pandas as pd
 import yaml
 
 from ghlobus.utilities.constants import GOOD_VIDEO_MSG, META_DIR
+from ghlobus.utilities.normalization import BIOMETRY_LOG_STATS, LGA_MEAN, LGA_STD
+from ghlobus.utilities.paths import output_file_base_name
 from ghlobus.utilities.sweep_utils import VERTICAL_PLUS_TRANSVERSE, VERTICAL_SWEEP_TAGS
 
 
@@ -81,7 +84,7 @@ def _add_outpath(df: pd.DataFrame, root_dir: str, data_dir: str, project: str) -
             data_dir,
             project,
             row["exam_dir"],
-            f"{os.path.splitext(row['filename'])[0]}.pt",
+            f"{output_file_base_name(row['filename'])}.pt",
         ),
         axis=1,
     )
@@ -94,26 +97,59 @@ def _write_splits(df: pd.DataFrame,
                   tag_filters: dict,
                   log_norm_cols: Iterable[str]) -> None:
     os.makedirs(out_path, exist_ok=True)
+    log_norm_cols = list(log_norm_cols)
+    split_frames = {
+        name: _filter_tags(df[df["PID"].isin(split_pids[name])].copy(), tag_filters.get(name))
+        for name in ["train", "val", "test"]
+    }
+    fixed_stats = {**BIOMETRY_LOG_STATS, "GA": (LGA_MEAN, LGA_STD)}
     norm_stats = {}
-    for split_name in ["train", "val", "test"]:
-        split_df = df[df["PID"].isin(split_pids[split_name])].copy()
-        split_df = _filter_tags(split_df, tag_filters.get(split_name))
+    # Validate the entire label contract before publishing any split CSV.
+    for col in log_norm_cols:
+        for name, frame in split_frames.items():
+            values = frame[col].astype(float)
+            if not (np.isfinite(values) & (values > 0)).all():
+                raise ValueError(f"{name}: {col} requires finite, positive labels for log normalization.")
+        train_values = np.log(split_frames["train"][col].astype(float))
+        if train_values.empty:
+            raise ValueError(f"No training labels available for {col} after filtering.")
+        mean, std = fixed_stats.get(col, (train_values.mean(), train_values.std()))
+        if pd.isna(std) or std == 0:
+            std = 1.0
+        norm_stats[col] = (mean, std)
+
+    for split_name, split_df in split_frames.items():
         for col in log_norm_cols:
             log_col = f"log_{col}"
-            z_col = f"z_log_{col.lower()}" if col != "GA" else "z_log_ga"
+            z_col = f"z_log_{col.lower()}"
             values = np.log(split_df[col].astype(float))
-            if split_name == "train":
-                norm_stats[col] = (values.mean(), values.std())
             mean, std = norm_stats[col]
-            if pd.isna(std) or std == 0:
-                std = 1
-            split_df[log_col] = values
-            split_df[z_col] = (values - mean) / std
+            normalized = (values - mean) / std
+            # Existing EFW configs consume standardized log_AC/log_FL/log_HC/log_BPD.
+            split_df[f"raw_log_{col}"] = values
+            split_df[log_col] = normalized if col in BIOMETRY_LOG_STATS else values
+            split_df[z_col] = normalized
+        if "GA" in log_norm_cols:
+            # Compatibility names required by the existing GA datamodule/callbacks.
+            # These contain Vivli GA; the alias does not assert BOE provenance.
+            split_df["ga_boe"] = split_df["GA"]
+            split_df["log_ga_boe"] = split_df["raw_log_GA"]
         split_df.sort_values(["PID", "exam_dir", "filename"]).to_csv(
             os.path.join(out_path, f"{split_name}.csv"),
             index=False,
         )
         print(f"Wrote {split_df.shape[0]} rows to {split_name}.csv.")
+
+    metadata = {
+        col: {"mean": float(mean), "std": float(std),
+              "source": ("legacy_v9" if col in BIOMETRY_LOG_STATS else
+                         "legacy_v4" if col == "GA" else "train"),
+              "normalized_column": f"log_{col}" if col in BIOMETRY_LOG_STATS else f"z_log_{col.lower()}"}
+        for col, (mean, std) in norm_stats.items()
+    }
+    with open(os.path.join(out_path, "normalization.json"), "w") as handle:
+        json.dump(metadata, handle, indent=2, allow_nan=False)
+        handle.write("\n")
 
 
 def main():

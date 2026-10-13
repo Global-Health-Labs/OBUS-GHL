@@ -345,3 +345,50 @@ summaries are saved at
 `gs://vivli-data/validation/20261012-4a8906c-training/evidence/`.
 Persistent VM workspace: `/data/obus-training-4a8906c-20261012`.
 Production outputs were not changed.
+
+## Twin exam smoke (2026-10-12 Pacific)
+
+Commit `5684df2021c1a2665fce15fd10fb7957e7fcd1e6` moves optional clip/video
+MIL imports into the selected dataset factory. Frame MIL imports and both
+training/inference dataloader factories now work without those optional
+implementations. The package exports exam datamodules directly, so unrelated
+import failures are no longer hidden by a broad `ModuleNotFoundError` handler.
+The local regression suite passed 51 tests.
+
+The exact committed archive was deployed to the CPU VM; its SHA-256 matched
+locally and remotely:
+`31b8e1e83443b3e149cae2b85a880929aa604c48a8029e8a04e33a1595639ed4`.
+Twin selection was regenerated from existing curated cloud metadata. Selected
+labels matched `NOF` in `{2, 3}` for positives, with the existing unknown-NOF
+singleton policy retained. All selected rows had patient IDs and consistent
+labels within each exam. Selection produced 201,470 videos: 5,006 positive and
+196,464 negative, from 56 twin patients and 2,840 singleton patients. Generated
+splits contained 77,370 training, 10,557 validation, and 13,609 test rows, with
+no patient overlap across splits.
+
+The real-media sample used four training exams (two per class) and two
+validation exams (one per class), each with six recognized sweeps: 36 videos
+total. Both classes were represented in each dataset. Exam dataloaders
+produced finite bags of shape `(2, 4, 3, 256, 256)` with integer labels `(2,)`.
+Source video/frame indices matched the corresponding exam and label. The
+inference-style validation factory returned `(1, 4, 3, 256, 256)`.
+
+The repository Lightning CLI ran the configured frame iMIL architecture
+(MobileNet V2, MIL attention, two-class classifier) for one epoch, limited to
+two training batches and one validation batch. Known-combination sampling and
+class upsampling were enabled. Bag size was reduced to four; GA balancing was
+disabled for the small sample. The unavailable prior twin checkpoint was
+omitted, using ImageNet initialization. CSV logging replaced external
+experiment logging; checkpointing was disabled. CPU float32 was used.
+
+Training loss was 0.679706 and validation loss was 0.700498; both were finite.
+These short runs verify execution rather than predictive performance. Runtime
+versions matched the GA/EFW smoke above. Clip/video MIL implementations remain
+absent and fail when explicitly selected. GPU/distributed/mixed-precision
+training, the prior twin checkpoint, GA-balanced upsampling, and full-size
+bags were not validated.
+
+Scripts, configs, metrics, logs, and aggregate summaries are saved at
+`gs://vivli-data/validation/20261012-5684df2-twin/evidence/`.
+Persistent VM workspace: `/data/obus-twin-5684df2-20261012`.
+Production outputs were not changed.
